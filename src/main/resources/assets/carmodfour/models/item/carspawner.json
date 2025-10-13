@@ -1,0 +1,6 @@
+{
+  "parent": "carmodfour:displaysettings/car_demo",
+  "textures": {
+    "layer0": "carmodfour:items/cardemo"
+  }
+}

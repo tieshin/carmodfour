@@ -1,0 +1,88 @@
+{
+  "mod_elements": [
+    {
+      "name": "CARSPAWNER",
+      "type": "animateditem",
+      "sortid": 2,
+      "compiles": true,
+      "locked_code": true,
+      "registry_name": "carspawner",
+      "metadata": {
+        "files": [
+          "src/main/java/net/mcreator/carmodfour/item/renderer/CARSPAWNERItemRenderer.java",
+          "src/main/resources/assets/carmodfour/models/item/carspawner.json",
+          "src/main/java/net/mcreator/carmodfour/item/model/CARSPAWNERItemModel.java",
+          "src/main/java/net/mcreator/carmodfour/item/CARSPAWNERItem.java"
+        ]
+      }
+    },
+    {
+      "name": "Cardemo",
+      "type": "animatedentity",
+      "sortid": 3,
+      "compiles": true,
+      "locked_code": true,
+      "registry_name": "cardemo",
+      "metadata": {
+        "files": [
+          "src/main/resources/data/carmodfour/forge/biome_modifier/cardemo_biome_modifier.json",
+          "src/main/java/net/mcreator/carmodfour/entity/model/CardemoModel.java",
+          "src/main/resources/assets/carmodfour/models/item/cardemo_spawn_egg.json",
+          "src/main/java/net/mcreator/carmodfour/entity/CardemoEntity.java",
+          "src/main/java/net/mcreator/carmodfour/client/renderer/CardemoRenderer.java"
+        ]
+      }
+    },
+    {
+      "name": "CarKey",
+      "type": "animateditem",
+      "sortid": 4,
+      "compiles": true,
+      "locked_code": false,
+      "registry_name": "car_key",
+      "metadata": {
+        "files": [
+          "src/main/java/net/mcreator/carmodfour/item/model/CarKeyItemModel.java",
+          "src/main/java/net/mcreator/carmodfour/item/CarKeyItem.java",
+          "src/main/java/net/mcreator/carmodfour/item/renderer/CarKeyItemRenderer.java",
+          "src/main/resources/assets/carmodfour/models/item/car_key.json"
+        ]
+      }
+    }
+  ],
+  "variable_elements": [],
+  "sound_elements": [],
+  "language_map": {
+    "en_us": {
+      "item.carmodfour.carspawner": "Basic Car",
+      "item.carmodfour.car_key": "Car Key",
+      "entity.carmodfour.cardemo": "Cardemo",
+      "item.carmodfour.cardemo_spawn_egg": "Cardemo Spawn Egg"
+    }
+  },
+  "foldersRoot": {
+    "name": "~",
+    "children": []
+  },
+  "workspaceSettings": {
+    "modid": "carmodfour",
+    "modName": "carmodfour",
+    "version": "1.0.0",
+    "author": "tiesh, MCreator",
+    "websiteURL": "https://mcreator.net",
+    "license": "Academic Free License v3.0",
+    "disableForgeVersionCheck": true,
+    "serverSideOnly": false,
+    "requiredMods": [],
+    "dependencies": [],
+    "dependants": [],
+    "mcreatorDependencies": [
+      "geckolib"
+    ],
+    "currentGenerator": "forge-1.19.2",
+    "credits": "Created using mod maker MCreator - https://mcreator.net/about",
+    "modElementsPackage": "net.mcreator.carmodfour",
+    "lockBaseModFiles": false
+  },
+  "mcreatorVersion": 202300110610
+}

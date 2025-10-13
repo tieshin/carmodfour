@@ -1,0 +1,6 @@
+{
+  "parent": "carmodfour:displaysettings/car_key",
+  "textures": {
+    "layer0": "carmodfour:items/carkey"
+  }
+}
