@@ -1,0 +1,38 @@
+# === Gradle ===
+.gradle/
+build/
+out/
+
+# Gradle wrapper jar
+gradle/wrapper/gradle-wrapper.jar
+
+# === IDEs ===
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# === Minecraft / MCreator ===
+run/
+logs/
+*.log
+*.log.gz
+*.lock
+
+# Generated sources / resources
+src/generated/
+bin/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# Secrets / local configs
+local.properties
+*.toml
