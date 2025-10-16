@@ -10,11 +10,10 @@ import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.PlayState;
 import software.bernie.geckolib3.core.IAnimatable;
 
-import net.minecraftforge.registries.ForgeRegistries;
 import net.minecraftforge.network.PlayMessages;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
-
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.entity.Mob;
@@ -37,6 +36,7 @@ import net.mcreator.carmodfour.init.CarmodfourModEntities;
 
 public class CardemoEntity extends Mob implements IAnimatable {
 
+    // --- SYNCED ENTITY DATA ---
     public static final EntityDataAccessor<Boolean> SHOOT =
             SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
     public static final EntityDataAccessor<String> ANIMATION =
@@ -45,41 +45,25 @@ public class CardemoEntity extends Mob implements IAnimatable {
             SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> VEHICLE_STATE =
             SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<Boolean> DOOR_OPEN =
+            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
+    private static final EntityDataAccessor<String> DRIVE_MODE =
+            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
 
-    public enum VehicleState {
-        LOCKED, UNLOCKED, ENGINE_OFF, ENGINE_ON
-    }
+    // --- ENUMS ---
+    public enum VehicleState { LOCKED, UNLOCKED, ENGINE_OFF, ENGINE_ON }
+    public enum DriveState { PARK, DRIVE, REVERSE }
 
+    // --- FIELDS ---
     private final AnimationFactory factory = GeckoLibUtil.createFactory(this);
     private String animationProcedure = "empty";
     private Player owner = null;
-
-    // Right side seat offset: right (+X), slightly up (+Y), slightly forward (+Z)
     private static final Vec3 DRIVER_OFFSET = new Vec3(0.25, 0.45, 0.3);
 
-    // Camera interpolation tracking
     @OnlyIn(Dist.CLIENT)
     private long entryStartTime = 0L;
 
-    public void setOwner(Player player) { if (owner == null) owner = player; }
-    public Player getOwner() { return owner; }
-    public boolean isOwner(Player player) { return owner != null && owner.getUUID().equals(player.getUUID()); }
-
-    public VehicleState getState() {
-        try { return VehicleState.valueOf(this.entityData.get(VEHICLE_STATE)); }
-        catch (IllegalArgumentException e) { return VehicleState.LOCKED; }
-    }
-
-    public void setState(VehicleState state) { this.entityData.set(VEHICLE_STATE, state.name()); }
-    public boolean isLocked() { return getState() == VehicleState.LOCKED; }
-    public boolean isEngineOn() { return getState() == VehicleState.ENGINE_ON; }
-    public void setLocked(boolean value) { setState(value ? VehicleState.LOCKED : VehicleState.UNLOCKED); }
-    public void setEngineOn(boolean value) { setState(value ? VehicleState.ENGINE_ON : VehicleState.ENGINE_OFF); }
-
-    public String getTexture() { return this.entityData.get(TEXTURE); }
-    public String getSyncedAnimation() { return this.entityData.get(ANIMATION); }
-    public void setAnimation(String name) { this.entityData.set(ANIMATION, name); }
-
+    // --- CONSTRUCTORS ---
     public CardemoEntity(PlayMessages.SpawnEntity packet, Level world) {
         this(CarmodfourModEntities.CARDEMO.get(), world);
     }
@@ -91,9 +75,66 @@ public class CardemoEntity extends Mob implements IAnimatable {
         setNoGravity(false);
     }
 
-    @Override
-    protected void registerGoals() {}
+    // --- OWNER HANDLING ---
+    public void setOwner(Player player) { if (owner == null) owner = player; }
+    public Player getOwner() { return owner; }
+    public boolean isOwner(Player player) { return owner != null && owner.getUUID().equals(player.getUUID()); }
 
+    // --- VEHICLE & DRIVE STATE MANAGEMENT ---
+    private void updateVehicleState(String type, String value) {
+        switch (type) {
+            case "Drive" -> this.entityData.set(DRIVE_MODE, value);
+            case "Vehicle" -> this.entityData.set(VEHICLE_STATE, value);
+            case "Door" -> this.entityData.set(DOOR_OPEN, Boolean.parseBoolean(value));
+        }
+
+        // Persistent NBT
+        this.getPersistentData().putString("DriveState", getDriveState().name());
+        this.getPersistentData().putString("VehicleState", getState().name());
+        this.getPersistentData().putBoolean("DoorOpen", isDoorOpen());
+
+        // Tags
+        this.removeTag("Drive_PARK");
+        this.removeTag("Drive_DRIVE");
+        this.removeTag("Drive_REVERSE");
+        this.addTag("Drive_" + getDriveState().name());
+
+        this.removeTag("Vehicle_LOCKED");
+        this.removeTag("Vehicle_UNLOCKED");
+        this.removeTag("Vehicle_ENGINE_OFF");
+        this.removeTag("Vehicle_ENGINE_ON");
+        this.addTag("Vehicle_" + getState().name());
+
+        this.removeTag("Door_OPEN");
+        this.removeTag("Door_CLOSED");
+        this.addTag(isDoorOpen() ? "Door_OPEN" : "Door_CLOSED");
+    }
+
+    public VehicleState getState() {
+        try { return VehicleState.valueOf(this.entityData.get(VEHICLE_STATE)); }
+        catch (IllegalArgumentException e) { return VehicleState.LOCKED; }
+    }
+    public void setState(VehicleState state) { updateVehicleState("Vehicle", state.name()); }
+    public boolean isLocked() { return getState() == VehicleState.LOCKED; }
+    public boolean isEngineOn() { return getState() == VehicleState.ENGINE_ON; }
+    public void setLocked(boolean value) { setState(value ? VehicleState.LOCKED : VehicleState.UNLOCKED); }
+    public void setEngineOn(boolean value) { setState(value ? VehicleState.ENGINE_ON : VehicleState.ENGINE_OFF); }
+
+    public DriveState getDriveState() {
+        try { return DriveState.valueOf(this.entityData.get(DRIVE_MODE)); }
+        catch (IllegalArgumentException e) { return DriveState.PARK; }
+    }
+    public void setDriveState(DriveState state) { updateVehicleState("Drive", state.name()); }
+
+    public boolean isDoorOpen() { return this.entityData.get(DOOR_OPEN); }
+    public void setDoorOpen(boolean open) { updateVehicleState("Door", Boolean.toString(open)); }
+
+    // --- TEXTURE & ANIM ---
+    public String getTexture() { return this.entityData.get(TEXTURE); }
+    public String getSyncedAnimation() { return this.entityData.get(ANIMATION); }
+    public void setAnimation(String name) { this.entityData.set(ANIMATION, name); }
+
+    // --- SYNC DATA ---
     @Override
     protected void defineSynchedData() {
         super.defineSynchedData();
@@ -101,26 +142,90 @@ public class CardemoEntity extends Mob implements IAnimatable {
         this.entityData.define(ANIMATION, "undefined");
         this.entityData.define(TEXTURE, "cardemo");
         this.entityData.define(VEHICLE_STATE, VehicleState.LOCKED.name());
+        this.entityData.define(DOOR_OPEN, false);
+        this.entityData.define(DRIVE_MODE, DriveState.PARK.name());
     }
 
+    // --- SAVE & LOAD NBT ---
+    @Override
+    public void addAdditionalSaveData(CompoundTag tag) {
+        super.addAdditionalSaveData(tag);
+        tag.putString("DriveState", getDriveState().name());
+        tag.putString("VehicleState", getState().name());
+        tag.putBoolean("DoorOpen", isDoorOpen());
+    }
+
+    @Override
+    public void readAdditionalSaveData(CompoundTag tag) {
+        super.readAdditionalSaveData(tag);
+        if (tag.contains("DriveState")) setDriveState(DriveState.valueOf(tag.getString("DriveState")));
+        if (tag.contains("VehicleState")) setState(VehicleState.valueOf(tag.getString("VehicleState")));
+        if (tag.contains("DoorOpen")) setDoorOpen(tag.getBoolean("DoorOpen"));
+    }
+
+    // --- TICK ---
     @Override
     public void tick() {
         super.tick();
 
-        // Gravity & friction
-        if (!this.isOnGround()) {
-            this.setDeltaMovement(this.getDeltaMovement().add(0, -0.08, 0));
-        } else {
+        // Gravity
+        if (!this.isOnGround()) this.setDeltaMovement(this.getDeltaMovement().add(0, -0.08, 0));
+
+        // Friction
+        if (this.isOnGround()) {
             Vec3 motion = this.getDeltaMovement();
-            this.setDeltaMovement(new Vec3(motion.x * 0.5, 0, motion.z * 0.5));
+            this.setDeltaMovement(new Vec3(motion.x * 0.9, motion.y, motion.z * 0.9));
         }
 
-        // Smooth camera orientation on client
+        // --- SERVER-SIDE LOGIC ---
+        if (!level.isClientSide) {
+            if (isEngineOn() && getDriveState() != DriveState.PARK) {
+                Vec3 forward = getForwardVector();
+                switch (getDriveState()) {
+                    case DRIVE -> this.setPos(this.getX() + forward.x * 0.05, this.getY(), this.getZ() + forward.z * 0.05);
+                    case REVERSE -> this.setPos(this.getX() - forward.x * 0.03, this.getY(), this.getZ() - forward.z * 0.03);
+                    default -> {}
+                }
+            }
+        }
+
+        // --- CLIENT-SIDE ---
         if (level.isClientSide) {
+            Minecraft mc = Minecraft.getInstance();
             handleSmoothCameraLock();
+            renderDriveStateHotbar(mc); // keep rendering hotbar, no input check
         }
     }
 
+    // --- HOTBAR DISPLAY (always 3-second delay) ---
+    @OnlyIn(Dist.CLIENT)
+    private void renderDriveStateHotbar(Minecraft mc) {
+        Player player = mc.player;
+        if (player == null) return;
+
+        if (player.getVehicle() != this || !isEngineOn()) return;
+
+        if (entryStartTime == 0L) entryStartTime = System.currentTimeMillis();
+        long elapsed = System.currentTimeMillis() - entryStartTime;
+        if (elapsed < 3000L) return; // always wait 3 seconds
+
+        String hotbarText = "";
+        hotbarText += getDriveState() == DriveState.PARK ? "( 1. P )" : "1. P";
+        hotbarText += " || ";
+        hotbarText += getDriveState() == DriveState.DRIVE ? "( 2. D )" : "2. D";
+        hotbarText += " || ";
+        hotbarText += getDriveState() == DriveState.REVERSE ? "( 3. R )" : "3. R";
+
+        mc.gui.setOverlayMessage(net.minecraft.network.chat.Component.literal(hotbarText), false);
+    }
+
+    // --- FORWARD VECTOR ---
+    private Vec3 getForwardVector() {
+        float yawRad = (float) Math.toRadians(this.getYRot());
+        return new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
+    }
+
+    // --- CAMERA LOCK ---
     @OnlyIn(Dist.CLIENT)
     private void handleSmoothCameraLock() {
         Minecraft mc = Minecraft.getInstance();
@@ -132,7 +237,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
             if (entryStartTime == 0L) entryStartTime = currentTime;
 
             float elapsed = (currentTime - entryStartTime) / 1000f;
-            float duration = 1.25f; // 1.25 seconds for full alignment
+            float duration = 1.25f;
 
             float carYaw = this.getYRot();
             float playerYaw = player.getYRot();
@@ -143,15 +248,13 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 player.setYRot(newYaw);
                 player.yRotO = newYaw;
             } else {
-                // Done interpolating
                 player.setYRot(carYaw);
                 player.yRotO = carYaw;
             }
-        } else {
-            entryStartTime = 0L; // reset when exiting
-        }
+        } else entryStartTime = 0L;
     }
 
+    // --- RIDER POSITION ---
     @Override
     public void positionRider(Entity passenger) {
         if (this.hasPassenger(passenger)) {
@@ -161,14 +264,43 @@ public class CardemoEntity extends Mob implements IAnimatable {
         }
     }
 
+    // --- INTERACTION ---
     @Override
     public InteractionResult mobInteract(Player player, InteractionHand hand) {
-        if (!this.level.isClientSide) {
-            if (this.isLocked()) {
-                player.displayClientMessage(net.minecraft.network.chat.Component.literal("Vehicle is locked."), true);
-                player.playNotifySound(
-                        ForgeRegistries.SOUND_EVENTS.getValue(new net.minecraft.resources.ResourceLocation("minecraft:block.iron_door.close")),
-                        net.minecraft.sounds.SoundSource.PLAYERS, 1.0f, 1.0f
+        boolean sneaking = player.isShiftKeyDown();
+        boolean client = this.level.isClientSide;
+
+        if (sneaking) {
+            if (!client) {
+                if (isLocked()) {
+                    player.displayClientMessage(
+                            net.minecraft.network.chat.Component.literal("Car is locked."), true
+                    );
+                    return InteractionResult.FAIL;
+                }
+
+                if (isDoorOpen()) {
+                    setAnimationProcedure("r_door_close");
+                    setDoorOpen(false);
+                } else {
+                    setAnimationProcedure("r_door_open");
+                    setDoorOpen(true);
+                }
+            }
+            return InteractionResult.SUCCESS;
+        }
+
+        if (!client) {
+            if (isLocked()) {
+                player.displayClientMessage(
+                        net.minecraft.network.chat.Component.literal("Car is locked."), true
+                );
+                return InteractionResult.FAIL;
+            }
+
+            if (!isDoorOpen()) {
+                player.displayClientMessage(
+                        net.minecraft.network.chat.Component.literal("Door is shut."), true
                 );
                 return InteractionResult.FAIL;
             }
@@ -180,9 +312,11 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 return InteractionResult.SUCCESS;
             }
         }
-        return InteractionResult.sidedSuccess(this.level.isClientSide);
+
+        return InteractionResult.sidedSuccess(client);
     }
 
+    // --- REGISTRATION ---
     public static void init() {
         SpawnPlacements.register(CarmodfourModEntities.CARDEMO.get(),
                 SpawnPlacements.Type.ON_GROUND,
@@ -201,18 +335,26 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 .add(Attributes.FOLLOW_RANGE, 16);
     }
 
+    // --- ANIMATIONS ---
     private <E extends IAnimatable> PlayState movementPredicate(AnimationEvent<E> event) {
         if (this.animationProcedure.equals("empty")) {
-            event.getController().setAnimation(new AnimationBuilder().addAnimation("brake_down", EDefaultLoopTypes.LOOP));
+            event.getController().setAnimation(
+                    new AnimationBuilder().addAnimation("brake_down", EDefaultLoopTypes.LOOP)
+            );
             return PlayState.CONTINUE;
         }
         return PlayState.STOP;
     }
 
     private <E extends IAnimatable> PlayState procedurePredicate(AnimationEvent<E> event) {
-        if (!this.animationProcedure.equals("empty") &&
-                event.getController().getAnimationState().equals(software.bernie.geckolib3.core.AnimationState.Stopped)) {
-            event.getController().setAnimation(new AnimationBuilder().addAnimation(this.animationProcedure, EDefaultLoopTypes.PLAY_ONCE));
+        if (!this.animationProcedure.equals("empty")
+                && event.getController().getAnimationState()
+                == software.bernie.geckolib3.core.AnimationState.Stopped) {
+
+            event.getController().setAnimation(
+                    new AnimationBuilder().addAnimation(this.animationProcedure, EDefaultLoopTypes.PLAY_ONCE)
+            );
+
             this.animationProcedure = "empty";
             event.getController().markNeedsReload();
         }

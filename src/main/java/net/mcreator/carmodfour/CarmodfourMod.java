@@ -1,90 +1,92 @@
-/*
- *    MCreator note:
- *
- *    If you lock base mod element files, you can edit this file and it won't get overwritten.
- *    If you change your modid or package, you need to apply these changes to this file MANUALLY.
- *
- *    Settings in @Mod annotation WON'T be changed in case of the base mod element
- *    files lock too, so you need to set them manually here in such case.
- *
- *    If you do not lock base mod element files in Workspace settings, this file
- *    will be REGENERATED on each build.
- *
- */
 package net.mcreator.carmodfour;
 
-import software.bernie.geckolib3.GeckoLib;
-
-import org.apache.logging.log4j.Logger;
-import org.apache.logging.log4j.LogManager;
-
-import net.minecraftforge.network.simple.SimpleChannel;
-import net.minecraftforge.network.NetworkRegistry;
-import net.minecraftforge.network.NetworkEvent;
-import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
+import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.network.NetworkRegistry;
+import net.minecraftforge.network.simple.SimpleChannel;
 
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraftforge.network.NetworkEvent;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import software.bernie.geckolib3.GeckoLib;
 import net.mcreator.carmodfour.init.CarmodfourModItems;
 import net.mcreator.carmodfour.init.CarmodfourModEntities;
+import net.mcreator.carmodfour.network.DriveStateChangePacket;
 
-import java.util.function.Supplier;
-import java.util.function.Function;
-import java.util.function.BiConsumer;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.List;
-import java.util.Collection;
 import java.util.ArrayList;
 import java.util.AbstractMap;
 
-@Mod("carmodfour")
+@Mod(CarmodfourMod.MODID)
 public class CarmodfourMod {
-	public static final Logger LOGGER = LogManager.getLogger(CarmodfourMod.class);
-	public static final String MODID = "carmodfour";
+    public static final String MODID = "carmodfour";
+    public static final Logger LOGGER = LogManager.getLogger(MODID);
 
-	public CarmodfourMod() {
-		MinecraftForge.EVENT_BUS.register(this);
+    private static final String PROTOCOL_VERSION = "1";
+    public static final SimpleChannel PACKET_HANDLER = NetworkRegistry.newSimpleChannel(
+            new ResourceLocation(MODID, "main"),
+            () -> PROTOCOL_VERSION,
+            PROTOCOL_VERSION::equals,
+            PROTOCOL_VERSION::equals
+    );
+    private static int messageID = 0;
 
-		IEventBus bus = FMLJavaModLoadingContext.get().getModEventBus();
+    public CarmodfourMod() {
+        IEventBus bus = FMLJavaModLoadingContext.get().getModEventBus();
+        CarmodfourModItems.REGISTRY.register(bus);
+        CarmodfourModEntities.REGISTRY.register(bus);
+        GeckoLib.initialize();
 
-		CarmodfourModItems.REGISTRY.register(bus);
-		CarmodfourModEntities.REGISTRY.register(bus);
+        MinecraftForge.EVENT_BUS.register(this);
 
-		GeckoLib.initialize();
-	}
+        registerPackets();
+    }
 
-	private static final String PROTOCOL_VERSION = "1";
-	public static final SimpleChannel PACKET_HANDLER = NetworkRegistry.newSimpleChannel(new ResourceLocation(MODID, MODID), () -> PROTOCOL_VERSION, PROTOCOL_VERSION::equals, PROTOCOL_VERSION::equals);
-	private static int messageID = 0;
+    private void registerPackets() {
+        addNetworkMessage(
+                DriveStateChangePacket.class,
+                DriveStateChangePacket::toBytes,
+                DriveStateChangePacket::new,
+                DriveStateChangePacket::handle
+        );
+        LOGGER.info("[Carmodfour] Network packets registered successfully!");
+    }
 
-	public static <T> void addNetworkMessage(Class<T> messageType, BiConsumer<T, FriendlyByteBuf> encoder, Function<FriendlyByteBuf, T> decoder, BiConsumer<T, Supplier<NetworkEvent.Context>> messageConsumer) {
-		PACKET_HANDLER.registerMessage(messageID, messageType, encoder, decoder, messageConsumer);
-		messageID++;
-	}
+    public static <T> void addNetworkMessage(Class<T> messageType, BiConsumer<T, FriendlyByteBuf> encoder,
+                                             Function<FriendlyByteBuf, T> decoder,
+                                             BiConsumer<T, Supplier<NetworkEvent.Context>> messageConsumer) {
+        PACKET_HANDLER.registerMessage(messageID++, messageType, encoder, decoder, messageConsumer);
+    }
 
-	private static final Collection<AbstractMap.SimpleEntry<Runnable, Integer>> workQueue = new ConcurrentLinkedQueue<>();
+    // Simple delayed server work queue (used by MCreator)
+    private static final ConcurrentLinkedQueue<AbstractMap.SimpleEntry<Runnable, Integer>> workQueue = new ConcurrentLinkedQueue<>();
 
-	public static void queueServerWork(int tick, Runnable action) {
-		workQueue.add(new AbstractMap.SimpleEntry(action, tick));
-	}
+    public static void queueServerWork(int tickDelay, Runnable action) {
+        workQueue.add(new AbstractMap.SimpleEntry<>(action, tickDelay));
+    }
 
-	@SubscribeEvent
-	public void tick(TickEvent.ServerTickEvent event) {
-		if (event.phase == TickEvent.Phase.END) {
-			List<AbstractMap.SimpleEntry<Runnable, Integer>> actions = new ArrayList<>();
-			workQueue.forEach(work -> {
-				work.setValue(work.getValue() - 1);
-				if (work.getValue() == 0)
-					actions.add(work);
-			});
-			actions.forEach(e -> e.getKey().run());
-			workQueue.removeAll(actions);
-		}
-	}
+    @SubscribeEvent
+    public void tick(TickEvent.ServerTickEvent event) {
+        if (event.phase == TickEvent.Phase.END) {
+            List<AbstractMap.SimpleEntry<Runnable, Integer>> actions = new ArrayList<>();
+            workQueue.forEach(work -> {
+                work.setValue(work.getValue() - 1);
+                if (work.getValue() <= 0) actions.add(work);
+            });
+            actions.forEach(e -> e.getKey().run());
+            workQueue.removeAll(actions);
+        }
+    }
 }

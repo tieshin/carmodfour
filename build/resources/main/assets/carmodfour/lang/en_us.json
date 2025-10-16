@@ -3,5 +3,10 @@
   "item.carmodfour.car_key": "Car Key",
   "entity.carmodfour.cardemo": "Cardemo",
   "item.carmodfour.cardemo_spawn_egg": "Cardemo Spawn Egg",
-  "item.carmodfour.examplegeckolibitem": "Vehicle Key"
+  "item.carmodfour.examplegeckolibitem": "Vehicle Key",
+  
+  "key.categories.carmodfour": "Car Controls",
+  "key.carmodfour.drive.park": "Drive - Park",
+  "key.carmodfour.drive.drive": "Drive - Drive",
+  "key.carmodfour.drive.reverse": "Drive - Reverse"
 }
