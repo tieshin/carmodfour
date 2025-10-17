@@ -109,10 +109,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
     public String getSyncedAnimation() { return this.entityData.get(ANIMATION); }
     public void setAnimation(String name) { this.entityData.set(ANIMATION, name); }
 
-    // ✅ Added back for MCreator compatibility
-    public void setAnimationProcedure(String animation) {
-        setAnimation(animation);
-    }
+    public void setAnimationProcedure(String animation) { setAnimation(animation); }
 
     @Override
     protected void defineSynchedData() {
@@ -196,10 +193,35 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 // ✅ Physics fix — proper collision movement
                 this.move(MoverType.SELF, motion);
 
+                // ✅ Terrain tilt: tilt car up/down based on slope
+                double sampleDistance = 0.6;
+                Vec3 forwardVec = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
+
+                Vec3 frontPos = this.position().add(forwardVec.scale(sampleDistance));
+                Vec3 backPos = this.position().add(forwardVec.scale(-sampleDistance));
+
+                double frontY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) frontPos.x, (int) frontPos.z);
+                double backY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) backPos.x, (int) backPos.z);
+
+                double dy = frontY - backY;
+                double dx = sampleDistance * 2;
+
+                float targetPitch = (float) Math.toDegrees(Math.atan2(dy, dx)) * -1F;
+                targetPitch = Math.max(-25F, Math.min(25F, targetPitch));
+
+                float smoothing = 0.25F;
+                float newPitch = this.getXRot() + (targetPitch - this.getXRot()) * smoothing;
+                this.setXRot(newPitch);
+
             } else {
                 currentSpeed = 0.0;
                 currentTurnRate *= 0.5f;
                 if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0f;
+
+                // Slowly return to level pitch when idle
+                float newPitch = this.getXRot() * 0.8F;
+                if (Math.abs(newPitch) < 0.5F) newPitch = 0F;
+                this.setXRot(newPitch);
             }
         }
 
