@@ -29,6 +29,7 @@ import net.minecraft.world.Difficulty;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.EntityDataAccessor;
+import net.minecraft.world.entity.MoverType;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.client.Minecraft;
 
@@ -36,40 +37,29 @@ import net.mcreator.carmodfour.init.CarmodfourModEntities;
 
 public class CardemoEntity extends Mob implements IAnimatable {
 
-    // --- SYNCED ENTITY DATA ---
-    public static final EntityDataAccessor<Boolean> SHOOT =
-            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
-    public static final EntityDataAccessor<String> ANIMATION =
-            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
-    public static final EntityDataAccessor<String> TEXTURE =
-            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
-    private static final EntityDataAccessor<String> VEHICLE_STATE =
-            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
-    private static final EntityDataAccessor<Boolean> DOOR_OPEN =
-            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
-    private static final EntityDataAccessor<String> DRIVE_MODE =
-            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
+    public static final EntityDataAccessor<Boolean> SHOOT = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
+    public static final EntityDataAccessor<String> ANIMATION = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
+    public static final EntityDataAccessor<String> TEXTURE = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<String> VEHICLE_STATE = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<Boolean> DOOR_OPEN = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
+    private static final EntityDataAccessor<String> DRIVE_MODE = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
 
-    // --- ENUMS ---
     public enum VehicleState { LOCKED, UNLOCKED, ENGINE_OFF, ENGINE_ON }
     public enum DriveState { PARK, DRIVE, REVERSE }
 
-    // --- FIELDS ---
     private final AnimationFactory factory = GeckoLibUtil.createFactory(this);
     private String animationProcedure = "empty";
     private Player owner = null;
     private static final Vec3 DRIVER_OFFSET = new Vec3(0.25, 0.45, 0.3);
 
-    // --- Physics / control state (server-authoritative) ---
     private boolean accelerating = false;
     private boolean braking = false;
     private boolean turningLeft = false;
     private boolean turningRight = false;
 
-    private double currentSpeed = 0.0;      // blocks/tick
-    private float currentTurnRate = 0.0f;   // degrees per tick (signed)
+    private double currentSpeed = 0.0;
+    private float currentTurnRate = 0.0f;
 
-    // --- Tunable constants ---
     private static final double MAX_SPEED = 0.35;
     private static final double ACCEL_FACTOR = 0.08;
     private static final double BRAKE_FACTOR = 0.25;
@@ -81,7 +71,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
     @OnlyIn(Dist.CLIENT)
     private long entryStartTime = 0L;
 
-    // --- CONSTRUCTORS ---
     public CardemoEntity(PlayMessages.SpawnEntity packet, Level world) {
         this(CarmodfourModEntities.CARDEMO.get(), world);
     }
@@ -93,44 +82,15 @@ public class CardemoEntity extends Mob implements IAnimatable {
         setNoGravity(false);
     }
 
-    // --- OWNER HANDLING ---
     public void setOwner(Player player) { if (owner == null) owner = player; }
     public Player getOwner() { return owner; }
     public boolean isOwner(Player player) { return owner != null && owner.getUUID().equals(player.getUUID()); }
-
-    // --- VEHICLE & DRIVE STATE MANAGEMENT ---
-    private void updateVehicleState(String type, String value) {
-        switch (type) {
-            case "Drive" -> this.entityData.set(DRIVE_MODE, value);
-            case "Vehicle" -> this.entityData.set(VEHICLE_STATE, value);
-            case "Door" -> this.entityData.set(DOOR_OPEN, Boolean.parseBoolean(value));
-        }
-
-        this.getPersistentData().putString("DriveState", getDriveState().name());
-        this.getPersistentData().putString("VehicleState", getState().name());
-        this.getPersistentData().putBoolean("DoorOpen", isDoorOpen());
-
-        this.removeTag("Drive_PARK");
-        this.removeTag("Drive_DRIVE");
-        this.removeTag("Drive_REVERSE");
-        this.addTag("Drive_" + getDriveState().name());
-
-        this.removeTag("Vehicle_LOCKED");
-        this.removeTag("Vehicle_UNLOCKED");
-        this.removeTag("Vehicle_ENGINE_OFF");
-        this.removeTag("Vehicle_ENGINE_ON");
-        this.addTag("Vehicle_" + getState().name());
-
-        this.removeTag("Door_OPEN");
-        this.removeTag("Door_CLOSED");
-        this.addTag(isDoorOpen() ? "Door_OPEN" : "Door_CLOSED");
-    }
 
     public VehicleState getState() {
         try { return VehicleState.valueOf(this.entityData.get(VEHICLE_STATE)); }
         catch (IllegalArgumentException e) { return VehicleState.LOCKED; }
     }
-    public void setState(VehicleState state) { updateVehicleState("Vehicle", state.name()); }
+    public void setState(VehicleState state) { this.entityData.set(VEHICLE_STATE, state.name()); }
     public boolean isLocked() { return getState() == VehicleState.LOCKED; }
     public boolean isEngineOn() { return getState() == VehicleState.ENGINE_ON; }
     public void setLocked(boolean value) { setState(value ? VehicleState.LOCKED : VehicleState.UNLOCKED); }
@@ -140,17 +100,20 @@ public class CardemoEntity extends Mob implements IAnimatable {
         try { return DriveState.valueOf(this.entityData.get(DRIVE_MODE)); }
         catch (IllegalArgumentException e) { return DriveState.PARK; }
     }
-    public void setDriveState(DriveState state) { updateVehicleState("Drive", state.name()); }
+    public void setDriveState(DriveState state) { this.entityData.set(DRIVE_MODE, state.name()); }
 
     public boolean isDoorOpen() { return this.entityData.get(DOOR_OPEN); }
-    public void setDoorOpen(boolean open) { updateVehicleState("Door", Boolean.toString(open)); }
+    public void setDoorOpen(boolean open) { this.entityData.set(DOOR_OPEN, open); }
 
-    // --- TEXTURE & ANIM ---
     public String getTexture() { return this.entityData.get(TEXTURE); }
     public String getSyncedAnimation() { return this.entityData.get(ANIMATION); }
     public void setAnimation(String name) { this.entityData.set(ANIMATION, name); }
 
-    // --- SYNC DATA ---
+    // ✅ Added back for MCreator compatibility
+    public void setAnimationProcedure(String animation) {
+        setAnimation(animation);
+    }
+
     @Override
     protected void defineSynchedData() {
         super.defineSynchedData();
@@ -162,7 +125,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
         this.entityData.define(DRIVE_MODE, DriveState.PARK.name());
     }
 
-    // --- SAVE & LOAD NBT ---
     @Override
     public void addAdditionalSaveData(CompoundTag tag) {
         super.addAdditionalSaveData(tag);
@@ -179,52 +141,37 @@ public class CardemoEntity extends Mob implements IAnimatable {
         if (tag.contains("DoorOpen")) setDoorOpen(tag.getBoolean("DoorOpen"));
     }
 
-    // --- INPUT FLAG SETTERS ---
     public void setAccelerating(boolean accelerating) { this.accelerating = accelerating; }
     public void setBraking(boolean braking) { this.braking = braking; }
     public void setTurningLeft(boolean turningLeft) { this.turningLeft = turningLeft; }
     public void setTurningRight(boolean turningRight) { this.turningRight = turningRight; }
 
-    // --- TICK (server authoritative with speed-dependent centering) ---
     @Override
     public void tick() {
         super.tick();
         float tickDelta = 1f;
-
-        // Gravity
-        if (!this.isOnGround()) this.setDeltaMovement(this.getDeltaMovement().add(0, -0.08 * tickDelta, 0));
-
-        // Friction
-        if (this.isOnGround()) {
-            Vec3 motion = this.getDeltaMovement();
-            this.setDeltaMovement(new Vec3(motion.x * 0.9, motion.y, motion.z * 0.9));
-        }
 
         if (!level.isClientSide) {
             if (isEngineOn() && getDriveState() != DriveState.PARK) {
                 double targetMax = (getDriveState() == DriveState.DRIVE) ? MAX_SPEED : MAX_SPEED * 0.5;
 
                 if (!this.getPassengers().isEmpty()) {
-                    // Normal acceleration/brake/drag for a player-driven car
                     if (accelerating) currentSpeed += ACCEL_FACTOR * (targetMax - currentSpeed) * tickDelta;
                     else if (braking) currentSpeed -= BRAKE_FACTOR * currentSpeed * tickDelta;
                     else { currentSpeed -= DRAG * tickDelta; if (currentSpeed < IDLE_SPEED) currentSpeed = IDLE_SPEED; }
                 } else {
-                    // --- Unmanned car: smoothly decay to IDLE_SPEED over 5s ---
                     double decayPerTick = (currentSpeed - IDLE_SPEED) / (5.0 / tickDelta);
                     currentSpeed -= decayPerTick;
                 }
 
                 currentSpeed = Math.max(0, Math.min(currentSpeed, targetMax));
 
-                // --- NATURAL TURN CENTERING ---
                 float desiredTurn = 0f;
                 if (turningLeft && !turningRight) desiredTurn = -MAX_TURN_RATE;
                 else if (turningRight && !turningLeft) desiredTurn = MAX_TURN_RATE;
 
                 float turnDiff = desiredTurn - currentTurnRate;
                 float turnStep = TURN_ACCEL * tickDelta;
-
                 if (Math.abs(turnDiff) < turnStep) currentTurnRate = desiredTurn;
                 else currentTurnRate += Math.signum(turnDiff) * turnStep;
 
@@ -241,9 +188,14 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 double yawRad = Math.toRadians(this.getYRot());
                 double motionX = -Math.sin(yawRad) * speedDir;
                 double motionZ = Math.cos(yawRad) * speedDir;
-                this.setDeltaMovement(motionX, this.getDeltaMovement().y, motionZ);
+
+                Vec3 motion = new Vec3(motionX, this.getDeltaMovement().y, motionZ);
+                this.setDeltaMovement(motion);
                 this.hasImpulse = true;
-                this.setPos(this.getX() + motionX, this.getY(), this.getZ() + motionZ);
+
+                // ✅ Physics fix — proper collision movement
+                this.move(MoverType.SELF, motion);
+
             } else {
                 currentSpeed = 0.0;
                 currentTurnRate *= 0.5f;
@@ -251,52 +203,10 @@ public class CardemoEntity extends Mob implements IAnimatable {
             }
         }
 
-        // Client visuals
         if (level.isClientSide) {
             Minecraft mc = Minecraft.getInstance();
-            handleSmoothCameraLock();
             renderDriveStateHotbar(mc);
         }
-    }
-
-    // --- RESET TURN ON DISMOUNT ---
-    @Override
-    protected void removePassenger(Entity passenger) {
-        super.removePassenger(passenger);
-        if (passenger instanceof Player) {
-            turningLeft = false;
-            turningRight = false;
-            currentTurnRate = 0.0f;
-        }
-    }
-
-    // --- CLIENT UTILS ---
-    @OnlyIn(Dist.CLIENT)
-    private void handleSmoothCameraLock() {
-        Minecraft mc = Minecraft.getInstance();
-        Player player = mc.player;
-        if (player == null) return;
-
-        if (player.getVehicle() == this) {
-            long currentTime = System.currentTimeMillis();
-            if (entryStartTime == 0L) entryStartTime = currentTime;
-
-            float elapsed = (currentTime - entryStartTime) / 1000f;
-            float duration = 1.25f;
-
-            float carYaw = this.getYRot();
-            float playerYaw = player.getYRot();
-
-            if (elapsed < duration) {
-                float t = elapsed / duration;
-                float newYaw = playerYaw + (carYaw - playerYaw) * t;
-                player.setYRot(newYaw);
-                player.yRotO = newYaw;
-            } else {
-                player.setYRot(carYaw);
-                player.yRotO = carYaw;
-            }
-        } else entryStartTime = 0L;
     }
 
     @OnlyIn(Dist.CLIENT)
@@ -304,10 +214,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
         Player player = mc.player;
         if (player == null) return;
         if (player.getVehicle() != this || !isEngineOn()) return;
-
-        if (entryStartTime == 0L) entryStartTime = System.currentTimeMillis();
-        long elapsed = System.currentTimeMillis() - entryStartTime;
-        if (elapsed < 3000L) return;
 
         String hotbarText = "";
         hotbarText += getDriveState() == DriveState.PARK ? "( 1. P )" : "1. P";
@@ -319,15 +225,10 @@ public class CardemoEntity extends Mob implements IAnimatable {
         mc.gui.setOverlayMessage(net.minecraft.network.chat.Component.literal(hotbarText), false);
     }
 
-    private Vec3 getForwardVector() {
-        float yawRad = (float) Math.toRadians(this.getYRot());
-        return new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
-    }
-
     @Override
     public void positionRider(Entity passenger) {
         if (this.hasPassenger(passenger)) {
-            Vec3 rotatedOffset = DRIVER_OFFSET.yRot((float) Math.toRadians(-this.getYRot()));
+            Vec3 rotatedOffset = DRIVER_OFFSET.yRot((float)Math.toRadians(-this.getYRot()));
             Vec3 targetPos = this.position().add(rotatedOffset);
             passenger.setPos(targetPos.x, targetPos.y, targetPos.z);
         }
@@ -341,17 +242,15 @@ public class CardemoEntity extends Mob implements IAnimatable {
         if (sneaking) {
             if (!client) {
                 if (isLocked()) {
-                    player.displayClientMessage(
-                            net.minecraft.network.chat.Component.literal("Car is locked."), true
-                    );
+                    player.displayClientMessage(net.minecraft.network.chat.Component.literal("Car is locked."), true);
                     return InteractionResult.FAIL;
                 }
 
                 if (isDoorOpen()) {
-                    setAnimationProcedure("r_door_close");
+                    setAnimation("r_door_close");
                     setDoorOpen(false);
                 } else {
-                    setAnimationProcedure("r_door_open");
+                    setAnimation("r_door_open");
                     setDoorOpen(true);
                 }
             }
@@ -360,23 +259,19 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
         if (!client) {
             if (isLocked()) {
-                player.displayClientMessage(
-                        net.minecraft.network.chat.Component.literal("Car is locked."), true
-                );
+                player.displayClientMessage(net.minecraft.network.chat.Component.literal("Car is locked."), true);
                 return InteractionResult.FAIL;
             }
 
             if (!isDoorOpen()) {
-                player.displayClientMessage(
-                        net.minecraft.network.chat.Component.literal("Door is shut."), true
-                );
+                player.displayClientMessage(net.minecraft.network.chat.Component.literal("Door is shut."), true);
                 return InteractionResult.FAIL;
             }
 
             if (this.getPassengers().isEmpty()) {
                 player.startRiding(this, true);
                 setOwner(player);
-                setAnimationProcedure("player_enter");
+                setAnimation("player_enter");
                 return InteractionResult.SUCCESS;
             }
         }
@@ -402,7 +297,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 .add(Attributes.FOLLOW_RANGE, 16);
     }
 
-    // --- ANIMATIONS ---
     private <E extends IAnimatable> PlayState movementPredicate(AnimationEvent<E> event) {
         if (this.animationProcedure.equals("empty")) {
             event.getController().setAnimation(
@@ -414,14 +308,12 @@ public class CardemoEntity extends Mob implements IAnimatable {
     }
 
     private <E extends IAnimatable> PlayState procedurePredicate(AnimationEvent<E> event) {
-        if (!this.animationProcedure.equals("empty")
-                && event.getController().getAnimationState()
-                == software.bernie.geckolib3.core.AnimationState.Stopped) {
-
+        if (!this.animationProcedure.equals("empty") &&
+                event.getController().getAnimationState() ==
+                        software.bernie.geckolib3.core.AnimationState.Stopped) {
             event.getController().setAnimation(
                     new AnimationBuilder().addAnimation(this.animationProcedure, EDefaultLoopTypes.PLAY_ONCE)
             );
-
             this.animationProcedure = "empty";
             event.getController().markNeedsReload();
         }
@@ -436,6 +328,4 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
     @Override
     public AnimationFactory getFactory() { return this.factory; }
-    public void setAnimationProcedure(String animation) { this.animationProcedure = animation; }
-    public String getAnimationProcedure() { return this.animationProcedure; }
 }
