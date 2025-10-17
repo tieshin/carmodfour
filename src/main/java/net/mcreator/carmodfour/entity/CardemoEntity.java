@@ -185,11 +185,10 @@ public class CardemoEntity extends Mob implements IAnimatable {
     public void setTurningLeft(boolean turningLeft) { this.turningLeft = turningLeft; }
     public void setTurningRight(boolean turningRight) { this.turningRight = turningRight; }
 
-    // --- TICK (server authoritative with interpolation) ---
+    // --- TICK (server authoritative with speed-dependent centering) ---
     @Override
     public void tick() {
         super.tick();
-
         float tickDelta = 1f;
 
         // Gravity
@@ -204,24 +203,36 @@ public class CardemoEntity extends Mob implements IAnimatable {
         if (!level.isClientSide) {
             if (isEngineOn() && getDriveState() != DriveState.PARK) {
                 double targetMax = (getDriveState() == DriveState.DRIVE) ? MAX_SPEED : MAX_SPEED * 0.5;
-                if (accelerating) currentSpeed += ACCEL_FACTOR * (targetMax - currentSpeed) * tickDelta;
-                else if (braking) currentSpeed -= BRAKE_FACTOR * currentSpeed * tickDelta;
-                else { currentSpeed -= DRAG * tickDelta; if (currentSpeed < IDLE_SPEED) currentSpeed = IDLE_SPEED; }
+
+                if (!this.getPassengers().isEmpty()) {
+                    // Normal acceleration/brake/drag for a player-driven car
+                    if (accelerating) currentSpeed += ACCEL_FACTOR * (targetMax - currentSpeed) * tickDelta;
+                    else if (braking) currentSpeed -= BRAKE_FACTOR * currentSpeed * tickDelta;
+                    else { currentSpeed -= DRAG * tickDelta; if (currentSpeed < IDLE_SPEED) currentSpeed = IDLE_SPEED; }
+                } else {
+                    // --- Unmanned car: smoothly decay to IDLE_SPEED over 5s ---
+                    double decayPerTick = (currentSpeed - IDLE_SPEED) / (5.0 / tickDelta);
+                    currentSpeed -= decayPerTick;
+                }
 
                 currentSpeed = Math.max(0, Math.min(currentSpeed, targetMax));
 
+                // --- NATURAL TURN CENTERING ---
                 float desiredTurn = 0f;
                 if (turningLeft && !turningRight) desiredTurn = -MAX_TURN_RATE;
-                if (turningRight && !turningLeft) desiredTurn = MAX_TURN_RATE;
+                else if (turningRight && !turningLeft) desiredTurn = MAX_TURN_RATE;
 
                 float turnDiff = desiredTurn - currentTurnRate;
-                if (turnDiff != 0) {
-                    float turnStep = TURN_ACCEL * tickDelta;
-                    if (Math.abs(turnDiff) < turnStep) currentTurnRate = desiredTurn;
-                    else currentTurnRate += Math.signum(turnDiff) * turnStep;
-                } else {
-                    currentTurnRate *= Math.pow(0.75, tickDelta);
-                    if (Math.abs(currentTurnRate) < 0.01) currentTurnRate = 0f;
+                float turnStep = TURN_ACCEL * tickDelta;
+
+                if (Math.abs(turnDiff) < turnStep) currentTurnRate = desiredTurn;
+                else currentTurnRate += Math.signum(turnDiff) * turnStep;
+
+                if (!turningLeft && !turningRight) {
+                    float speedRatio = (float)(currentSpeed / MAX_SPEED);
+                    float dynamicCenterFactor = 0.85f + 0.15f * (1 - speedRatio);
+                    currentTurnRate *= dynamicCenterFactor;
+                    if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0f;
                 }
 
                 this.setYRot(this.getYRot() + currentTurnRate * tickDelta);
