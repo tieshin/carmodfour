@@ -60,6 +60,24 @@ public class CardemoEntity extends Mob implements IAnimatable {
     private Player owner = null;
     private static final Vec3 DRIVER_OFFSET = new Vec3(0.25, 0.45, 0.3);
 
+    // --- Physics / control state (server-authoritative) ---
+    private boolean accelerating = false;
+    private boolean braking = false;
+    private boolean turningLeft = false;
+    private boolean turningRight = false;
+
+    private double currentSpeed = 0.0;      // blocks/tick
+    private float currentTurnRate = 0.0f;   // degrees per tick (signed)
+
+    // Tunable constants
+    private static final double MAX_SPEED = 0.35;       // roughly target top speed (~50 mph equivalent tuning)
+    private static final double ACCEL_FACTOR = 0.08;    // controls exponential approach to max speed
+    private static final double BRAKE_FACTOR = 0.25;    // strong braking exponential factor
+    private static final double DRAG = 0.01;            // linear drag when no input
+    private static final double IDLE_SPEED = 0.02;      // minimal roll
+    private static final float MAX_TURN_RATE = 4.0f;    // degrees per tick at full steer
+    private static final float TURN_ACCEL = 0.25f;      // how fast turn rate ramps to max
+
     @OnlyIn(Dist.CLIENT)
     private long entryStartTime = 0L;
 
@@ -88,12 +106,10 @@ public class CardemoEntity extends Mob implements IAnimatable {
             case "Door" -> this.entityData.set(DOOR_OPEN, Boolean.parseBoolean(value));
         }
 
-        // Persistent NBT
         this.getPersistentData().putString("DriveState", getDriveState().name());
         this.getPersistentData().putString("VehicleState", getState().name());
         this.getPersistentData().putBoolean("DoorOpen", isDoorOpen());
 
-        // Tags
         this.removeTag("Drive_PARK");
         this.removeTag("Drive_DRIVE");
         this.removeTag("Drive_REVERSE");
@@ -163,6 +179,18 @@ public class CardemoEntity extends Mob implements IAnimatable {
         if (tag.contains("DoorOpen")) setDoorOpen(tag.getBoolean("DoorOpen"));
     }
 
+    // --- INPUT FLAG SETTERS (invoked from SteeringInputPacket) ---
+    public void setAccelerating(boolean accelerating) { this.accelerating = accelerating; }
+    public void setBraking(boolean braking) { this.braking = braking; }
+    public void setTurningLeft(boolean turningLeft) { this.turningLeft = turningLeft; }
+    public void setTurningRight(boolean turningRight) { this.turningRight = turningRight; }
+
+    // optional getters for debugging/tests
+    public boolean isAccelerating() { return accelerating; }
+    public boolean isBraking() { return braking; }
+    public boolean isTurningLeft() { return turningLeft; }
+    public boolean isTurningRight() { return turningRight; }
+
     // --- TICK ---
     @Override
     public void tick() {
@@ -171,43 +199,108 @@ public class CardemoEntity extends Mob implements IAnimatable {
         // Gravity
         if (!this.isOnGround()) this.setDeltaMovement(this.getDeltaMovement().add(0, -0.08, 0));
 
-        // Friction
+        // Friction while on ground
         if (this.isOnGround()) {
             Vec3 motion = this.getDeltaMovement();
             this.setDeltaMovement(new Vec3(motion.x * 0.9, motion.y, motion.z * 0.9));
         }
 
-        // --- SERVER-SIDE LOGIC ---
+        // Server-side authoritative physics
         if (!level.isClientSide) {
+            // Only simulate when engine is on and drive is DRIVE or REVERSE
             if (isEngineOn() && getDriveState() != DriveState.PARK) {
-                Vec3 forward = getForwardVector();
-                switch (getDriveState()) {
-                    case DRIVE -> this.setPos(this.getX() + forward.x * 0.05, this.getY(), this.getZ() + forward.z * 0.05);
-                    case REVERSE -> this.setPos(this.getX() - forward.x * 0.03, this.getY(), this.getZ() - forward.z * 0.03);
-                    default -> {}
+                // --- Speed update ---
+                if (getDriveState() == DriveState.DRIVE) {
+                    // accelerating -> exponential approach to max
+                    if (accelerating) {
+                        currentSpeed += ACCEL_FACTOR * (1.0 - (currentSpeed / MAX_SPEED));
+                    } else if (braking) {
+                        // braking strong exponential drop
+                        currentSpeed -= BRAKE_FACTOR * currentSpeed;
+                    } else {
+                        // natural linear drag toward idle speed
+                        currentSpeed -= DRAG;
+                        if (currentSpeed < IDLE_SPEED) currentSpeed = IDLE_SPEED;
+                    }
+
+                    // clamp
+                    if (currentSpeed < 0.0) currentSpeed = 0.0;
+                    if (currentSpeed > MAX_SPEED) currentSpeed = MAX_SPEED;
+                } else { // REVERSE behavior (slower max and inverted direction)
+                    double reverseMax = MAX_SPEED * 0.5;
+                    if (accelerating) {
+                        currentSpeed += ACCEL_FACTOR * (1.0 - (currentSpeed / reverseMax));
+                    } else if (braking) {
+                        currentSpeed -= BRAKE_FACTOR * currentSpeed;
+                    } else {
+                        currentSpeed -= DRAG;
+                        if (currentSpeed < IDLE_SPEED * 0.5) currentSpeed = IDLE_SPEED * 0.5;
+                    }
+                    if (currentSpeed < 0.0) currentSpeed = 0.0;
+                    if (currentSpeed > reverseMax) currentSpeed = reverseMax;
                 }
+
+                // --- Steering / Turn rate update ---
+                if (turningLeft && !turningRight) {
+                    // ramp turn rate toward negative max (left)
+                    float desired = -MAX_TURN_RATE;
+                    float delta = TURN_ACCEL * (1.0f - Math.abs(currentTurnRate) / MAX_TURN_RATE);
+                    currentTurnRate = currentTurnRate - Math.min(Math.abs(desired - currentTurnRate), delta);
+                    // clamp
+                    if (currentTurnRate < -MAX_TURN_RATE) currentTurnRate = -MAX_TURN_RATE;
+                } else if (turningRight && !turningLeft) {
+                    // ramp turn rate toward positive max (right)
+                    float desired = MAX_TURN_RATE;
+                    float delta = TURN_ACCEL * (1.0f - Math.abs(currentTurnRate) / MAX_TURN_RATE);
+                    currentTurnRate = currentTurnRate + Math.min(Math.abs(desired - currentTurnRate), delta);
+                    if (currentTurnRate > MAX_TURN_RATE) currentTurnRate = MAX_TURN_RATE;
+                } else {
+                    // decay turn rate toward zero
+                    currentTurnRate *= 0.75f;
+                    if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0.0f;
+                }
+
+                // Apply yaw
+                this.setYRot(this.getYRot() + currentTurnRate);
+
+                // --- Apply motion based on yaw and currentSpeed ---
+                double speedDir = (getDriveState() == DriveState.DRIVE) ? currentSpeed : -currentSpeed;
+                double yawRad = Math.toRadians(this.getYRot());
+                double motionX = -Math.sin(yawRad) * speedDir;
+                double motionZ = Math.cos(yawRad) * speedDir;
+
+                // Keep vertical motion as-is
+                this.setDeltaMovement(motionX, this.getDeltaMovement().y, motionZ);
+                this.hasImpulse = true;
+
+                // Move the entity according to the deltaMovement
+                this.setPos(this.getX() + getDeltaMovement().x, this.getY(), this.getZ() + getDeltaMovement().z);
+            } else {
+                // engine off or in PARK: gently zero speed & turn rate
+                currentSpeed = 0.0;
+                currentTurnRate *= 0.5f;
+                if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0.0f;
             }
         }
 
-        // --- CLIENT-SIDE ---
+        // Client-side only visuals
         if (level.isClientSide) {
             Minecraft mc = Minecraft.getInstance();
             handleSmoothCameraLock();
-            renderDriveStateHotbar(mc); // keep rendering hotbar, no input check
+            renderDriveStateHotbar(mc);
         }
     }
 
-    // --- HOTBAR DISPLAY (always 3-second delay) ---
+    // --- HOTBAR DISPLAY (client only) ---
     @OnlyIn(Dist.CLIENT)
     private void renderDriveStateHotbar(Minecraft mc) {
         Player player = mc.player;
         if (player == null) return;
-
         if (player.getVehicle() != this || !isEngineOn()) return;
 
         if (entryStartTime == 0L) entryStartTime = System.currentTimeMillis();
         long elapsed = System.currentTimeMillis() - entryStartTime;
-        if (elapsed < 3000L) return; // always wait 3 seconds
+        if (elapsed < 3000L) return; // 3-second delay
 
         String hotbarText = "";
         hotbarText += getDriveState() == DriveState.PARK ? "( 1. P )" : "1. P";
@@ -219,7 +312,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         mc.gui.setOverlayMessage(net.minecraft.network.chat.Component.literal(hotbarText), false);
     }
 
-    // --- FORWARD VECTOR ---
+    // --- FORWARD VECTOR (helper) ---
     private Vec3 getForwardVector() {
         float yawRad = (float) Math.toRadians(this.getYRot());
         return new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));

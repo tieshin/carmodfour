@@ -20,6 +20,7 @@ import software.bernie.geckolib3.GeckoLib;
 import net.mcreator.carmodfour.init.CarmodfourModItems;
 import net.mcreator.carmodfour.init.CarmodfourModEntities;
 import net.mcreator.carmodfour.network.DriveStateChangePacket;
+import net.mcreator.carmodfour.network.SteeringInputPacket;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.BiConsumer;
@@ -55,12 +56,22 @@ public class CarmodfourMod {
     }
 
     private void registerPackets() {
+        // Existing DriveStateChangePacket
         addNetworkMessage(
                 DriveStateChangePacket.class,
                 DriveStateChangePacket::toBytes,
                 DriveStateChangePacket::new,
                 DriveStateChangePacket::handle
         );
+
+        // ✅ New SteeringInputPacket
+        addNetworkMessage(
+                SteeringInputPacket.class,
+                SteeringInputPacket::toBytes,
+                SteeringInputPacket::new,
+                SteeringInputPacket::handle
+        );
+
         LOGGER.info("[Carmodfour] Network packets registered successfully!");
     }
 
