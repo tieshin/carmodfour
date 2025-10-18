@@ -856,7 +856,7 @@
 				}
 			}
 		},
-		"brake_down": {
+		"Brake_down": {
 			"loop": "hold_on_last_frame",
 			"animation_length": 0.5,
 			"bones": {

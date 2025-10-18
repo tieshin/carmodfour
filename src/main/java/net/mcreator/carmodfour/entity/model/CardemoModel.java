@@ -3,16 +3,15 @@ package net.mcreator.carmodfour.entity.model;
 import software.bernie.geckolib3.model.AnimatedGeoModel;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.processor.IBone;
-
 import net.minecraft.resources.ResourceLocation;
 import net.mcreator.carmodfour.entity.CardemoEntity;
 
-@SuppressWarnings("deprecation") // setLivingAnimations is deprecated in 3.1.39, but still correct for 1.19.2
 public class CardemoModel extends AnimatedGeoModel<CardemoEntity> {
 
     @Override
     public ResourceLocation getAnimationResource(CardemoEntity entity) {
-        return new ResourceLocation("carmodfour", "animations/car_demo.animation.json");
+        // No actual animations used — placeholder JSON
+        return new ResourceLocation("carmodfour", "animations/blank.animation.json");
     }
 
     @Override
@@ -22,26 +21,35 @@ public class CardemoModel extends AnimatedGeoModel<CardemoEntity> {
 
     @Override
     public ResourceLocation getTextureResource(CardemoEntity entity) {
-        return new ResourceLocation("carmodfour",
-                "textures/entities/" + entity.getTexture() + ".png");
+        return new ResourceLocation("carmodfour", "textures/entities/" + entity.getTexture() + ".png");
     }
 
-    @SuppressWarnings("deprecation")
+    // No @Override — GeckoLib 3.1.39 quirk
     public void setLivingAnimations(CardemoEntity entity, Integer uniqueID, AnimationEvent<CardemoEntity> event) {
         super.setLivingAnimations(entity, uniqueID, event);
 
-        // Get the top-level "car" bone from your model
-        IBone root = this.getAnimationProcessor().getBone("car");
-        if (root != null) {
-            // Convert entity pitch to radians for GeckoLib
-            float pitch = entity.getXRot();
+        // === DOOR VISUAL TEST ===
+        // Fetch right and left door bones
+        IBone rightDoor = this.getAnimationProcessor().getBone("r_door");
+        IBone leftDoor  = this.getAnimationProcessor().getBone("l_door");
 
-            // Smooth out rotation to prevent snapping
-            float current = root.getRotationX();
-            float target = (float) Math.toRadians(pitch);
-            float smooth = current + (target - current) * 0.2F; // smaller factor = smoother
+        // Determine the target angle — open = 45°, closed = 0°
+        float doorTargetDeg = entity.isDoorOpen() ? 45F : 0F;
+        float doorTargetRad = (float) Math.toRadians(doorTargetDeg);
 
-            root.setRotationX(smooth);
+        // Smoothly interpolate the current door rotation toward the target
+        float smoothing = 0.25F;
+
+        if (rightDoor != null) {
+            float current = rightDoor.getRotationY();
+            float updated = current + (doorTargetRad - current) * smoothing;
+            rightDoor.setRotationY(updated);
+        }
+
+        if (leftDoor != null) {
+            float current = leftDoor.getRotationY();
+            float updated = current + (-doorTargetRad - current) * smoothing;
+            leftDoor.setRotationY(updated);
         }
     }
 }
