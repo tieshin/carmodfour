@@ -38,6 +38,14 @@ import net.minecraft.client.Minecraft;
 
 import net.mcreator.carmodfour.init.CarmodfourModEntities;
 
+// === Added imports for collision damage/knockback ===
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.damagesource.DamageSource;
+
+// === Added imports for sounds ===
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
+
 public class CardemoEntity extends Mob implements IAnimatable {
 
     public static final EntityDataAccessor<Boolean> SHOOT = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
@@ -78,6 +86,12 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
     @OnlyIn(Dist.CLIENT)
     private long entryStartTime = 0L;
+
+    // === Added: client-side speed gauge state ===
+    @OnlyIn(Dist.CLIENT)
+    private Vec3 clientPrevPos = null;
+    @OnlyIn(Dist.CLIENT)
+    private double clientSpeedBps = 0.0;
 
     public CardemoEntity(PlayMessages.SpawnEntity packet, Level world) {
         this(CarmodfourModEntities.CARDEMO.get(), world);
@@ -166,12 +180,58 @@ public class CardemoEntity extends Mob implements IAnimatable {
                     case REVERSE -> handleReverseMode(tickDelta);
                     case PARK -> handleParkMode();
                 }
+
+                // === Added: handle forward collisions with entities ===
+                handleEntityCollisions();
             }
         }
 
         if (level.isClientSide) {
+            // === Added: speed gauge computation (client-only) ===
+            Vec3 now = this.position();
+            if (clientPrevPos == null) {
+                clientPrevPos = now;
+            } else {
+                Vec3 d = new Vec3(now.x - clientPrevPos.x, 0, now.z - clientPrevPos.z);
+                double inst = d.length() * 20.0; // blocks per second (20 ticks per second)
+                clientSpeedBps = clientSpeedBps * 0.8 + inst * 0.2; // light smoothing
+                clientPrevPos = now;
+            }
+
             Minecraft mc = Minecraft.getInstance();
             renderDriveStateHotbar(mc);
+        }
+    }
+
+    // === Added: proportional damage/knockback and instant stop on collision ===
+    private void handleEntityCollisions() {
+        if (currentSpeed <= 0.05) return;
+
+        double yawRad = Math.toRadians(this.getYRot());
+        Vec3 forward = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
+
+        // Look slightly ahead of the car and a bit wider than the car to catch contacts
+        AABB hitbox = this.getBoundingBox().move(forward.scale(0.6)).inflate(0.5);
+
+        java.util.List<Entity> entities = level.getEntities(this, hitbox,
+                e -> e instanceof LivingEntity && e != this && !e.isPassengerOfSameVehicle(this));
+
+        if (entities.isEmpty()) return;
+
+        double speedNow = currentSpeed;
+        currentSpeed = 0.0; // stop the car on impact
+
+        for (Entity e : entities) {
+            if (e instanceof LivingEntity living) {
+                // Lethal-ish at max speed: scales 0..20 damage (vanilla player has 20 HP)
+                float damage = (float) Math.min(20.0, (speedNow / MAX_SPEED) * 20.0);
+                living.hurt(DamageSource.mobAttack(this), damage);
+
+                // Fling forward proportional to speed
+                Vec3 fling = new Vec3(forward.x, 0.3, forward.z).scale(speedNow * 4.0);
+                living.push(fling.x, fling.y, fling.z);
+                living.hasImpulse = true;
+            }
         }
     }
 
@@ -306,14 +366,13 @@ public class CardemoEntity extends Mob implements IAnimatable {
         if (player == null) return;
         if (player.getVehicle() != this || !isEngineOn()) return;
 
-        String hotbarText = "";
-        hotbarText += getDriveState() == DriveState.PARK ? "( 1. P )" : "1. P";
-        hotbarText += " || ";
-        hotbarText += getDriveState() == DriveState.DRIVE ? "( 2. D )" : "2. D";
-        hotbarText += " || ";
-        hotbarText += getDriveState() == DriveState.REVERSE ? "( 3. R )" : "3. R";
+        // === Updated formatting with speed gauge ===
+        String p = getDriveState() == DriveState.PARK ? "( P )" : "P";
+        String d = getDriveState() == DriveState.DRIVE ? "( D )" : "D";
+        String r = getDriveState() == DriveState.REVERSE ? "( R )" : "R";
 
-        mc.gui.setOverlayMessage(net.minecraft.network.chat.Component.literal(hotbarText), false);
+        String text = String.format("| %s | %s | %s | || %.1f b/s", p, d, r, clientSpeedBps);
+        mc.gui.setOverlayMessage(net.minecraft.network.chat.Component.literal(text), false);
     }
 
     @Override
@@ -323,6 +382,23 @@ public class CardemoEntity extends Mob implements IAnimatable {
             Vec3 targetPos = this.position().add(rotatedOffset);
             passenger.setPos(targetPos.x, targetPos.y, targetPos.z);
         }
+    }
+
+    // === Added: server-side iron door sounds with distance-based volume/pitch ===
+    private void playDoorSound(boolean opening, Player source) {
+        if (this.level.isClientSide) return; // ensure it plays once server-side, sent to all nearby clients
+        float dist = (source != null) ? (float) source.distanceTo(this) : 0f;
+        float volume = Math.max(0.35f, 1.0f - (dist / 24.0f));   // fades with distance, never fully silent
+        float pitch  = Math.max(0.75f, 1.0f - (dist / 48.0f));   // slightly lower pitch when farther
+
+        this.level.playSound(
+                null, // null => broadcast around this position
+                this.blockPosition(),
+                opening ? SoundEvents.IRON_DOOR_OPEN : SoundEvents.IRON_DOOR_CLOSE,
+                SoundSource.BLOCKS,
+                volume,
+                pitch
+        );
     }
 
     @Override
@@ -338,9 +414,13 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 }
 
                 if (isDoorOpen()) {
+                    // play close sound
+                    playDoorSound(false, player);
                     setAnimation("r_door_close");
                     setDoorOpen(false);
                 } else {
+                    // play open sound
+                    playDoorSound(true, player);
                     setAnimation("r_door_open");
                     setDoorOpen(true);
                 }
@@ -382,10 +462,23 @@ public class CardemoEntity extends Mob implements IAnimatable {
     public static AttributeSupplier.Builder createAttributes() {
         return Mob.createMobAttributes()
                 .add(Attributes.MOVEMENT_SPEED, 0.0)
-                .add(Attributes.MAX_HEALTH, 20)
-                .add(Attributes.ARMOR, 0)
+                .add(Attributes.MAX_HEALTH, 200) // increased durability
+                .add(Attributes.ARMOR, 10)       // sturdier body
+                .add(Attributes.KNOCKBACK_RESISTANCE, 1.0) // total knockback immunity
                 .add(Attributes.ATTACK_DAMAGE, 0)
                 .add(Attributes.FOLLOW_RANGE, 16);
+    }
+
+    // === Prevent knockback from attacks, players, explosions, etc. ===
+    @Override
+    public void knockback(double strength, double x, double z) {
+        // Intentionally empty: the car does not get knocked back
+    }
+
+    // If you want it to still collide but not be pushed by entities:
+    @Override
+    public boolean isPushable() {
+        return false;
     }
 
     private <E extends IAnimatable> PlayState movementPredicate(AnimationEvent<E> event) {
