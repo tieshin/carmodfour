@@ -149,79 +149,14 @@ public class CardemoEntity extends Mob implements IAnimatable {
         float tickDelta = 1f;
 
         if (!level.isClientSide) {
-            if (isEngineOn() && getDriveState() != DriveState.PARK) {
-                double targetMax = (getDriveState() == DriveState.DRIVE) ? MAX_SPEED : MAX_SPEED * 0.5;
+            if (isEngineOn()) {
+                DriveState mode = getDriveState();
 
-                if (!this.getPassengers().isEmpty()) {
-                    if (accelerating) currentSpeed += ACCEL_FACTOR * (targetMax - currentSpeed) * tickDelta;
-                    else if (braking) currentSpeed -= BRAKE_FACTOR * currentSpeed * tickDelta;
-                    else { currentSpeed -= DRAG * tickDelta; if (currentSpeed < IDLE_SPEED) currentSpeed = IDLE_SPEED; }
-                } else {
-                    double decayPerTick = (currentSpeed - IDLE_SPEED) / (5.0 / tickDelta);
-                    currentSpeed -= decayPerTick;
+                switch (mode) {
+                    case DRIVE -> handleDriveMode(tickDelta);
+                    case REVERSE -> handleReverseMode(tickDelta);
+                    case PARK -> handleParkMode();
                 }
-
-                currentSpeed = Math.max(0, Math.min(currentSpeed, targetMax));
-
-                float desiredTurn = 0f;
-                if (turningLeft && !turningRight) desiredTurn = -MAX_TURN_RATE;
-                else if (turningRight && !turningLeft) desiredTurn = MAX_TURN_RATE;
-
-                float turnDiff = desiredTurn - currentTurnRate;
-                float turnStep = TURN_ACCEL * tickDelta;
-                if (Math.abs(turnDiff) < turnStep) currentTurnRate = desiredTurn;
-                else currentTurnRate += Math.signum(turnDiff) * turnStep;
-
-                if (!turningLeft && !turningRight) {
-                    float speedRatio = (float)(currentSpeed / MAX_SPEED);
-                    float dynamicCenterFactor = 0.85f + 0.15f * (1 - speedRatio);
-                    currentTurnRate *= dynamicCenterFactor;
-                    if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0f;
-                }
-
-                this.setYRot(this.getYRot() + currentTurnRate * tickDelta);
-
-                double speedDir = (getDriveState() == DriveState.DRIVE) ? currentSpeed : -currentSpeed;
-                double yawRad = Math.toRadians(this.getYRot());
-                double motionX = -Math.sin(yawRad) * speedDir;
-                double motionZ = Math.cos(yawRad) * speedDir;
-
-                Vec3 motion = new Vec3(motionX, this.getDeltaMovement().y, motionZ);
-                this.setDeltaMovement(motion);
-                this.hasImpulse = true;
-
-                // ✅ Physics fix — proper collision movement
-                this.move(MoverType.SELF, motion);
-
-                // ✅ Terrain tilt: tilt car up/down based on slope
-                double sampleDistance = 0.6;
-                Vec3 forwardVec = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
-
-                Vec3 frontPos = this.position().add(forwardVec.scale(sampleDistance));
-                Vec3 backPos = this.position().add(forwardVec.scale(-sampleDistance));
-
-                double frontY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) frontPos.x, (int) frontPos.z);
-                double backY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) backPos.x, (int) backPos.z);
-
-                double dy = frontY - backY;
-                double dx = sampleDistance * 2;
-
-                float targetPitch = (float) Math.toDegrees(Math.atan2(dy, dx)) * -1F;
-                targetPitch = Math.max(-25F, Math.min(25F, targetPitch));
-
-                float smoothing = 0.25F;
-                float newPitch = this.getXRot() + (targetPitch - this.getXRot()) * smoothing;
-                this.setXRot(newPitch);
-
-            } else {
-                currentSpeed = 0.0;
-                currentTurnRate *= 0.5f;
-                if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0f;
-
-                // Slowly return to level pitch when idle
-                float newPitch = this.getXRot() * 0.8F;
-                if (Math.abs(newPitch) < 0.5F) newPitch = 0F;
-                this.setXRot(newPitch);
             }
         }
 
@@ -229,6 +164,110 @@ public class CardemoEntity extends Mob implements IAnimatable {
             Minecraft mc = Minecraft.getInstance();
             renderDriveStateHotbar(mc);
         }
+    }
+
+    private void handleDriveMode(float tickDelta) {
+        double targetMax = MAX_SPEED;
+
+        if (!this.getPassengers().isEmpty()) {
+            if (accelerating) currentSpeed += ACCEL_FACTOR * (targetMax - currentSpeed) * tickDelta;
+            else if (braking) currentSpeed -= BRAKE_FACTOR * currentSpeed * tickDelta;
+            else { currentSpeed -= DRAG * tickDelta; if (currentSpeed < IDLE_SPEED) currentSpeed = IDLE_SPEED; }
+        } else {
+            double decayPerTick = (currentSpeed - IDLE_SPEED) / (5.0 / tickDelta);
+            currentSpeed -= decayPerTick;
+        }
+
+        currentSpeed = Math.max(0, Math.min(currentSpeed, targetMax));
+
+        float desiredTurn = 0f;
+        if (turningLeft && !turningRight) desiredTurn = -MAX_TURN_RATE;
+        else if (turningRight && !turningLeft) desiredTurn = MAX_TURN_RATE;
+
+        updateTurnAndMotion(desiredTurn, tickDelta, false);
+    }
+
+    private void handleReverseMode(float tickDelta) {
+        double targetMax = MAX_SPEED * 0.5;
+        double accelFactor = ACCEL_FACTOR * 0.75;
+
+        if (!this.getPassengers().isEmpty()) {
+            if (accelerating) currentSpeed += accelFactor * (targetMax - currentSpeed) * tickDelta;
+            else if (braking) currentSpeed -= BRAKE_FACTOR * currentSpeed * tickDelta;
+            else { currentSpeed -= DRAG * tickDelta; if (currentSpeed < IDLE_SPEED) currentSpeed = IDLE_SPEED; }
+        } else {
+            double decayPerTick = (currentSpeed - IDLE_SPEED) / (5.0 / tickDelta);
+            currentSpeed -= decayPerTick;
+        }
+
+        currentSpeed = Math.max(0, Math.min(currentSpeed, targetMax));
+
+        float desiredTurn = 0f;
+        if (turningLeft && !turningRight) desiredTurn = -MAX_TURN_RATE;
+        else if (turningRight && !turningLeft) desiredTurn = MAX_TURN_RATE;
+
+        // Invert steering when reversing
+        desiredTurn *= -1;
+
+        updateTurnAndMotion(desiredTurn, tickDelta, true);
+    }
+
+    private void handleParkMode() {
+        currentSpeed = 0.0;
+        currentTurnRate *= 0.5f;
+        if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0f;
+
+        float newPitch = this.getXRot() * 0.8F;
+        if (Math.abs(newPitch) < 0.5F) newPitch = 0F;
+        this.setXRot(newPitch);
+    }
+
+    private void updateTurnAndMotion(float desiredTurn, float tickDelta, boolean reverse) {
+        float turnDiff = desiredTurn - currentTurnRate;
+        float turnStep = TURN_ACCEL * tickDelta;
+        if (Math.abs(turnDiff) < turnStep) currentTurnRate = desiredTurn;
+        else currentTurnRate += Math.signum(turnDiff) * turnStep;
+
+        if (!turningLeft && !turningRight) {
+            float speedRatio = (float)(currentSpeed / MAX_SPEED);
+            float dynamicCenterFactor = 0.85f + 0.15f * (1 - speedRatio);
+            currentTurnRate *= dynamicCenterFactor;
+            if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0f;
+        }
+
+        this.setYRot(this.getYRot() + currentTurnRate * tickDelta);
+
+        double yawRad = Math.toRadians(this.getYRot());
+        double motionX = reverse ? Math.sin(yawRad) * currentSpeed : -Math.sin(yawRad) * currentSpeed;
+        double motionZ = reverse ? -Math.cos(yawRad) * currentSpeed : Math.cos(yawRad) * currentSpeed;
+
+        Vec3 motion = new Vec3(motionX, this.getDeltaMovement().y, motionZ);
+        this.setDeltaMovement(motion);
+        this.hasImpulse = true;
+        this.move(MoverType.SELF, motion);
+
+        applyTerrainTilt(yawRad, tickDelta);
+    }
+
+    private void applyTerrainTilt(double yawRad, float tickDelta) {
+        double sampleDistance = 0.6;
+        Vec3 forwardVec = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
+
+        Vec3 frontPos = this.position().add(forwardVec.scale(sampleDistance));
+        Vec3 backPos = this.position().add(forwardVec.scale(-sampleDistance));
+
+        double frontY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) frontPos.x, (int) frontPos.z);
+        double backY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) backPos.x, (int) backPos.z);
+
+        double dy = frontY - backY;
+        double dx = sampleDistance * 2;
+
+        float targetPitch = (float) Math.toDegrees(Math.atan2(dy, dx)) * -1F;
+        targetPitch = Math.max(-25F, Math.min(25F, targetPitch));
+
+        float smoothing = 0.25F;
+        float newPitch = this.getXRot() + (targetPitch - this.getXRot()) * smoothing;
+        this.setXRot(newPitch);
     }
 
     @OnlyIn(Dist.CLIENT)

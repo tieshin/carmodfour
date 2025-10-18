@@ -38,8 +38,8 @@ public class SteeringKeybindHandler {
 
         if (player.getVehicle() instanceof CardemoEntity car) {
             boolean engineOn = car.isEngineOn();
-            boolean inDrive = car.getDriveState() == CardemoEntity.DriveState.DRIVE;
-            if (!engineOn || !inDrive) return;
+            boolean parked = car.getDriveState() == CardemoEntity.DriveState.PARK;
+            if (!engineOn || parked) return;
 
             // Press
             if (event.getAction() == GLFW.GLFW_PRESS) {

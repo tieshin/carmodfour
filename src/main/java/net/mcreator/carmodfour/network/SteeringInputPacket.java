@@ -40,11 +40,11 @@ public class SteeringInputPacket {
             ServerPlayer player = ctx.get().getSender();
             if (player == null) return;
 
-            // ✅ Corrected field reference here (level, not level())
             Entity entity = player.level.getEntity(message.entityId);
             if (!(entity instanceof CardemoEntity car)) return;
 
-            if (!car.isEngineOn() || car.getDriveState() != CardemoEntity.DriveState.DRIVE) return;
+            // ✅ Allow input in both DRIVE and REVERSE, but block if PARKED or engine off
+            if (!car.isEngineOn() || car.getDriveState() == CardemoEntity.DriveState.PARK) return;
 
             switch (message.key.toUpperCase()) {
                 case "W" -> car.setAccelerating(message.pressed);
