@@ -30,6 +30,9 @@ import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.world.entity.MoverType;
+import net.minecraft.world.entity.Pose;
+import net.minecraft.world.entity.EntityDimensions;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.client.Minecraft;
 
@@ -68,6 +71,11 @@ public class CardemoEntity extends Mob implements IAnimatable {
     private static final float MAX_TURN_RATE = 4.0f;
     private static final float TURN_ACCEL = 0.25f;
 
+    // === Custom hitbox ===
+    private static final float HITBOX_WIDTH = 2.5f;
+    private static final float HITBOX_HEIGHT = 1.0f;
+    private static final float HITBOX_LENGTH = 2.5f;
+
     @OnlyIn(Dist.CLIENT)
     private long entryStartTime = 0L;
 
@@ -80,6 +88,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         xpReward = 0;
         setNoAi(false);
         setNoGravity(false);
+        this.maxUpStep = 1.1f; // smoother climb over slabs/stairs
     }
 
     public void setOwner(Player player) { if (owner == null) owner = player; }
@@ -206,7 +215,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
         if (turningLeft && !turningRight) desiredTurn = -MAX_TURN_RATE;
         else if (turningRight && !turningLeft) desiredTurn = MAX_TURN_RATE;
 
-        // Invert steering when reversing
         desiredTurn *= -1;
 
         updateTurnAndMotion(desiredTurn, tickDelta, true);
@@ -216,10 +224,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
         currentSpeed = 0.0;
         currentTurnRate *= 0.5f;
         if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0f;
-
-        float newPitch = this.getXRot() * 0.8F;
-        if (Math.abs(newPitch) < 0.5F) newPitch = 0F;
-        this.setXRot(newPitch);
     }
 
     private void updateTurnAndMotion(float desiredTurn, float tickDelta, boolean reverse) {
@@ -241,7 +245,13 @@ public class CardemoEntity extends Mob implements IAnimatable {
         double motionX = reverse ? Math.sin(yawRad) * currentSpeed : -Math.sin(yawRad) * currentSpeed;
         double motionZ = reverse ? -Math.cos(yawRad) * currentSpeed : Math.cos(yawRad) * currentSpeed;
 
-        Vec3 motion = new Vec3(motionX, this.getDeltaMovement().y, motionZ);
+        // Adjust vertical motion for smoother slope climbing
+        double verticalBoost = 0.0;
+        if (this.onGround && currentSpeed > 0.05) {
+            verticalBoost = 0.1 * Math.min(1.0, currentSpeed / MAX_SPEED);
+        }
+
+        Vec3 motion = new Vec3(motionX, this.getDeltaMovement().y + verticalBoost, motionZ);
         this.setDeltaMovement(motion);
         this.hasImpulse = true;
         this.move(MoverType.SELF, motion);
@@ -249,8 +259,28 @@ public class CardemoEntity extends Mob implements IAnimatable {
         applyTerrainTilt(yawRad, tickDelta);
     }
 
+    // === Hitbox shape ===
+    @Override
+    public EntityDimensions getDimensions(Pose pose) {
+        return EntityDimensions.fixed(HITBOX_WIDTH, HITBOX_HEIGHT);
+    }
+
+    @Override
+    public void refreshDimensions() {
+        super.refreshDimensions();
+        double half = HITBOX_WIDTH / 2.0;
+        this.setBoundingBox(new AABB(
+                this.getX() - half,
+                this.getY(),
+                this.getZ() - (HITBOX_LENGTH / 2.0),
+                this.getX() + half,
+                this.getY() + HITBOX_HEIGHT,
+                this.getZ() + (HITBOX_LENGTH / 2.0)
+        ));
+    }
+
     private void applyTerrainTilt(double yawRad, float tickDelta) {
-        double sampleDistance = 0.6;
+        double sampleDistance = 0.8;
         Vec3 forwardVec = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
 
         Vec3 frontPos = this.position().add(forwardVec.scale(sampleDistance));
@@ -262,10 +292,10 @@ public class CardemoEntity extends Mob implements IAnimatable {
         double dy = frontY - backY;
         double dx = sampleDistance * 2;
 
-        float targetPitch = (float) Math.toDegrees(Math.atan2(dy, dx)) * -1F;
-        targetPitch = Math.max(-25F, Math.min(25F, targetPitch));
+        float targetPitch = (float)Math.toDegrees(Math.atan2(dy, dx)) * -1F;
+        targetPitch = Math.max(-30F, Math.min(30F, targetPitch));
 
-        float smoothing = 0.25F;
+        float smoothing = 0.3F;
         float newPitch = this.getXRot() + (targetPitch - this.getXRot()) * smoothing;
         this.setXRot(newPitch);
     }
