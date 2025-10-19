@@ -3,66 +3,29 @@ package net.mcreator.carmodfour.entity;
 /*
  * =============================================================================
  *  CardemoEntity.java  —  Vehicle Entity with Wall-Aware Roll, Terrain Tilt,
- *                         and Kinetic Collision Damage
+ *                         Silent Damage, and Robust Bump Recoil (Forge 1.19.2)
  * =============================================================================
  *
- *  This entity implements:
+ *  PURPOSE OF THIS REVISION
+ *  ------------------------
+ *  The user requested a "bumping" mechanic and verified that earlier attempts
+ *  did not trigger consistently. This revision strengthens bump detection and
+ *  fixes entity removal on death while preserving all existing systems:
  *
- *  • Manual driving states (PARK/DRIVE/REVERSE) with acceleration, braking,
- *    steering inertia and dynamic center biasing.
- *
- *  • Terrain pitch and roll using ground sampling (front/back and left/right)
- *    via downward scanning (ceiling-safe) to avoid tunnel/bridge magnetism.
- *
- *  • Proximity-based roll that makes the car lean AWAY from nearby left/right
- *    blocks (e.g., hugging a wall), clamped to ±22.5° and blended with terrain
- *    roll (±15°). The result is smoothed for stable visuals. Roll is **synced**
- *    to clients via entity data so visuals are consistent in SP/MP.
- *
- *  • KINETIC COLLISION DAMAGE:
- *      Hearts = 2 × speed_bps  →  HP = 4 × speed_bps
- *      - 10 b/s  ->  20 hearts (40 HP)
- *      - 14 b/s  ->  28 hearts (56 HP)
- *      - 20 b/s  ->  40 hearts (80 HP)
- *    Damage is applied with an armor-bypassing damage source so it cannot be
- *    mitigated. Knockback scales with impact energy.
- *
- *  • Slope lift (handled via a small vertical boost on motion while grounded)
- *    and visual lift (handled in renderer from pitch) — no server Y-forcing.
- *
- *  • Simple interaction flow: unlock/open door/enter; distance-aware door
- *    sounds; optional owner tracking.
- *
- * =============================================================================
- *  TUNING CHEATSHEET
- * =============================================================================
- *  Roll clamp (overall) ............... TOTAL_ROLL_CLAMP_DEG = 22.5f
- *  Terrain-only roll clamp ............ TERRAIN_ROLL_CLAMP_DEG = 15.0f
- *  Wall proximity roll clamp .......... PROX_ROLL_CLAMP_DEG = 22.5f
- *  Roll smoothing ..................... ROLL_SMOOTH = 0.15f
- *  Side scan (outward distance) ....... SIDE_CHECK_DIST = 1.35
- *  Side scan (front/back half-length) . SIDE_CHECK_HALF_LEN = 0.9
- *  Side scan steps (length) ........... SIDE_CHECK_STEP_LEN = 0.3
- *  Vertical scan range ................ Y: 0.1 -> 1.2 (step 0.3)
- *  Ground probe (downwards) ........... up to 8 blocks
- *
- * =============================================================================
- *  NOTES
- * =============================================================================
- *  • Damage units passed to LivingEntity#hurt are in **health points (HP)**,
- *    where 1 heart = 2 HP. The kinetic formula above already returns HP.
- *
- *  • The renderer should read:
- *      - entity.getXRot() for pitch
- *      - entity.getVisualRoll() for Z-roll (client reads synced float)
- *
- *  • If you want to soften the lean even more, reduce PROX_ROLL_CLAMP_DEG and/or
- *    TOTAL_ROLL_CLAMP_DEG a bit; if you want snappier/floatier lean, tweak
- *    ROLL_SMOOTH down/up respectively.
+ *   ✓ Manual drive states (PARK/DRIVE/REVERSE) with steering inertia
+ *   ✓ Terrain pitch + wall-aware roll (client-synced)
+ *   ✓ Kinetic collision damage to others (armor-bypassing)
+ *   ✓ Silent incoming damage (no red flash for this vehicle)
+ *   ✓ NEW: Bump recoil that triggers reliably on walls or steep rises
+ *   ✓ NEW: Proper removal on death (entity vanishes as expected)
  *
  * =============================================================================
  */
 
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import software.bernie.geckolib3.util.GeckoLibUtil;
 import software.bernie.geckolib3.core.manager.AnimationFactory;
 import software.bernie.geckolib3.core.manager.AnimationData;
@@ -111,11 +74,10 @@ import net.minecraft.sounds.SoundSource;
 
 public class CardemoEntity extends Mob implements IAnimatable {
 
-    /* -------------------------------------------------------------------------
-     *                        SYNCHRONIZED / RUNTIME STATE
-     * ------------------------------------------------------------------------- */
+    // ==========================================================================
+    // SYNCHRONIZED / RUNTIME STATE
+    // ==========================================================================
 
-    // Synchronized data accessors
     public static final EntityDataAccessor<Boolean> SHOOT =
             SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
     public static final EntityDataAccessor<String> ANIMATION =
@@ -128,36 +90,25 @@ public class CardemoEntity extends Mob implements IAnimatable {
             SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
     private static final EntityDataAccessor<String> DRIVE_MODE =
             SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
-
-    // Synced visual roll value so clients render exactly what server computes
     private static final EntityDataAccessor<Float> ROLL_SYNC =
             SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.FLOAT);
 
-    // High-level states
     public enum VehicleState { LOCKED, UNLOCKED, ENGINE_OFF, ENGINE_ON }
     public enum DriveState   { PARK, DRIVE, REVERSE }
 
-    // Anim/Factory
     private final AnimationFactory factory = GeckoLibUtil.createFactory(this);
     private String animationProcedure = "empty";
-
-    // Ownership (optional)
     private Player owner = null;
-
-    // Seat offset (driver)
     private static final Vec3 DRIVER_OFFSET = new Vec3(0.25, 0.45, 0.3);
 
-    // Input/motion booleans (wired from controls elsewhere)
     private boolean accelerating = false;
     private boolean braking      = false;
     private boolean turningLeft  = false;
     private boolean turningRight = false;
 
-    // Speed + steering
-    private double currentSpeed    = 0.0;   // blocks per tick
+    private double currentSpeed    = 0.0;
     private float  currentTurnRate = 0.0f;
 
-    // Core motion tuning
     private static final double MAX_SPEED     = 0.35;
     private static final double ACCEL_FACTOR  = 0.08;
     private static final double BRAKE_FACTOR  = 0.25;
@@ -166,38 +117,20 @@ public class CardemoEntity extends Mob implements IAnimatable {
     private static final float  MAX_TURN_RATE = 4.0f;
     private static final float  TURN_ACCEL    = 0.25f;
 
-    // Entity physical size (broad-phase bounding shape)
     private static final float HITBOX_WIDTH  = 2.5f;
     private static final float HITBOX_HEIGHT = 1.0f;
     private static final float HITBOX_LENGTH = 2.5f;
 
-    // Client-side HUD speed smoothing
     @OnlyIn(Dist.CLIENT) private Vec3   clientPrevPos   = null;
     @OnlyIn(Dist.CLIENT) private double clientSpeedBps  = 0.0;
-
-    // Server-computed visual roll (synced to ROLL_SYNC)
     private float visualRoll = 0.0f;
 
-    /* -------------------------------------------------------------------------
-     *                               ROLL TUNING
-     * ------------------------------------------------------------------------- */
-
-    // Terrain roll clamp (gentle)
     private static final float TERRAIN_ROLL_CLAMP_DEG = 15.0f;
+    private static final float PROX_ROLL_CLAMP_DEG    = 22.5f;
+    private static final float TOTAL_ROLL_CLAMP_DEG   = 22.5f;
+    private static final float ROLL_SMOOTH            = 0.15f;
+    private static final float PROX_DEADZONE          = 0.03f;
 
-    // Proximity roll clamp (lean away from walls)
-    private static final float PROX_ROLL_CLAMP_DEG = 22.5f;
-
-    // Final safety clamp
-    private static final float TOTAL_ROLL_CLAMP_DEG = 22.5f;
-
-    // Smoothing toward target roll (0..1). Lower = heavier, higher = lighter.
-    private static final float ROLL_SMOOTH = 0.15f;
-
-    // Deadzone to prevent micro-flicker when sides equally close
-    private static final float PROX_DEADZONE = 0.03f;
-
-    // Side scanning parameters
     private static final double SIDE_CHECK_DIST      = 1.35;
     private static final double SIDE_CHECK_HALF_LEN  = 0.90;
     private static final double SIDE_CHECK_STEP_LEN  = 0.30;
@@ -205,14 +138,26 @@ public class CardemoEntity extends Mob implements IAnimatable {
     private static final double SIDE_CHECK_Y_END     = 1.20;
     private static final double SIDE_CHECK_Y_STEP    = 0.30;
 
-    // Debug logging toggle
     private static final boolean DBG_COLLISION_EVENTS = false;
-
+    private static final boolean DBG_BUMP_LOGS        = false;
     private static void dlog(boolean on, String msg) { if (on) System.out.println("[Cardemo] " + msg); }
 
-    /* -------------------------------------------------------------------------
-     *                                 CTOR / INIT
-     * ------------------------------------------------------------------------- */
+    // ==========================================================================
+    // BUMP / RECOIL SYSTEM (ROBUST)
+    // ==========================================================================
+
+    private static final double BUMP_PROBE_DIST   = 1.5;
+    private static final double BUMP_SLOPE_THRESH = 2.0;
+    private static final double RECOIL_TOTAL_DIST = 1.10;
+    private static final int    RECOIL_DURATION   = 12;
+    private static final int    RECOIL_COOLDOWN   = 8;
+    private static final float  BUMP_VOL          = 0.90f;
+    private static final float  BUMP_PITCH        = 0.85f;
+
+    private int   recoilTicks      = 0;
+    private int   recoilCooldown   = 0;
+    private Vec3  recoilDirection  = Vec3.ZERO;
+    private double recoilProgress  = 0.0;
 
     public CardemoEntity(PlayMessages.SpawnEntity packet, Level world) {
         this(CarmodfourModEntities.CARDEMO.get(), world);
@@ -222,12 +167,8 @@ public class CardemoEntity extends Mob implements IAnimatable {
         super(type, world);
         setNoAi(false);
         setNoGravity(false);
-        this.maxUpStep = 1.1f; // smoother steps over slabs, stairs, etc.
+        this.maxUpStep = 1.1f;
     }
-
-    /* -------------------------------------------------------------------------
-     *                             ACCESSORS / HELPERS
-     * ------------------------------------------------------------------------- */
 
     public void setOwner(Player player) { if (owner == null) owner = player; }
     public Player getOwner() { return owner; }
@@ -238,6 +179,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         catch (IllegalArgumentException e) { return VehicleState.LOCKED; }
     }
     public void setState(VehicleState state) { this.entityData.set(VEHICLE_STATE, state.name()); }
+
     public boolean isLocked()   { return getState() == VehicleState.LOCKED; }
     public boolean isEngineOn() { return getState() == VehicleState.ENGINE_ON; }
     public void setLocked(boolean value)   { setState(value ? VehicleState.LOCKED    : VehicleState.UNLOCKED); }
@@ -252,20 +194,15 @@ public class CardemoEntity extends Mob implements IAnimatable {
     public boolean isDoorOpen() { return this.entityData.get(DOOR_OPEN); }
     public void setDoorOpen(boolean open) { this.entityData.set(DOOR_OPEN, open); }
 
-    public String getTexture()        { return this.entityData.get(TEXTURE); }
-    public String getSyncedAnimation(){ return this.entityData.get(ANIMATION); }
+    public String getTexture()         { return this.entityData.get(TEXTURE); }
+    public String getSyncedAnimation() { return this.entityData.get(ANIMATION); }
     public void   setAnimation(String name) { this.entityData.set(ANIMATION, name); }
     public void   setAnimationProcedure(String animation) { setAnimation(animation); }
 
-    // Input flags (wire these from your keybinds)
     public void setAccelerating(boolean b) { this.accelerating = b; }
     public void setBraking(boolean b)      { this.braking = b; }
     public void setTurningLeft(boolean b)  { this.turningLeft = b; }
     public void setTurningRight(boolean b) { this.turningRight = b; }
-
-    /* -------------------------------------------------------------------------
-     *                            SYNCED DATA / SAVE
-     * ------------------------------------------------------------------------- */
 
     @Override
     protected void defineSynchedData() {
@@ -276,7 +213,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         this.entityData.define(VEHICLE_STATE, VehicleState.LOCKED.name());
         this.entityData.define(DOOR_OPEN, false);
         this.entityData.define(DRIVE_MODE, DriveState.PARK.name());
-        this.entityData.define(ROLL_SYNC, 0.0f); // client-facing synced roll
+        this.entityData.define(ROLL_SYNC, 0.0f);
     }
 
     @Override
@@ -285,7 +222,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
         tag.putString("DriveState", getDriveState().name());
         tag.putString("VehicleState", getState().name());
         tag.putBoolean("DoorOpen", isDoorOpen());
-        // visualRoll and ROLL_SYNC are visual only; no persistence needed
     }
 
     @Override
@@ -296,14 +232,19 @@ public class CardemoEntity extends Mob implements IAnimatable {
         if (tag.contains("DoorOpen")) setDoorOpen(tag.getBoolean("DoorOpen"));
     }
 
-    /* -------------------------------------------------------------------------
-     *                                    TICK
-     * ------------------------------------------------------------------------- */
+    @Override
+    public boolean hurt(DamageSource source, float amount) {
+        if (this.isInvulnerableTo(source)) return false;
+        float newHealth = Math.max(0.0F, this.getHealth() - amount);
+        this.setHealth(newHealth);
+        if (newHealth <= 0.0F && !this.level.isClientSide) this.discard();
+        return true;
+    }
 
     @Override
     public void tick() {
         super.tick();
-
+        if (recoilCooldown > 0) recoilCooldown--;
         if (!level.isClientSide) {
             if (isEngineOn()) {
                 switch (getDriveState()) {
@@ -313,27 +254,19 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 }
                 handleEntityCollisions();
             }
-        } else {
-            updateClientSpeedOverlay();
-        }
+        } else updateClientSpeedOverlay();
     }
-
-    /* -------------------------------------------------------------------------
-     *                             CLIENT HUD SPEED
-     * ------------------------------------------------------------------------- */
 
     @OnlyIn(Dist.CLIENT)
     private void updateClientSpeedOverlay() {
         Vec3 now = this.position();
-        if (clientPrevPos == null) {
-            clientPrevPos = now;
-        } else {
+        if (clientPrevPos == null) clientPrevPos = now;
+        else {
             Vec3 delta = now.subtract(clientPrevPos);
-            double instSpeed = new Vec3(delta.x, 0, delta.z).length() * 20.0; // blocks/sec
+            double instSpeed = new Vec3(delta.x, 0, delta.z).length() * 20.0;
             clientSpeedBps = clientSpeedBps * 0.8 + instSpeed * 0.2;
             clientPrevPos = now;
         }
-
         Minecraft mc = Minecraft.getInstance();
         if (mc.player != null && mc.player.isPassengerOfSameVehicle(this) && isEngineOn()) {
             String p = getDriveState() == DriveState.PARK    ? "( P )" : "P";
@@ -344,79 +277,47 @@ public class CardemoEntity extends Mob implements IAnimatable {
         }
     }
 
-    /* -------------------------------------------------------------------------
-     *                         KINETIC COLLISION DAMAGE
-     * ------------------------------------------------------------------------- */
-
-    /**
-     * Handles entity collisions ahead of the car — applying damage & knockback
-     * from current speed. **Uses blocks/second** for damage and knockback.
-     * Damage: hearts = 2 × speed_bps  ⇒  HP = 4 × speed_bps (armor-bypassing).
-     */
     private void handleEntityCollisions() {
-        // Skip if barely moving (per-tick threshold)
         if (currentSpeed <= 0.01) return;
-
-        // Compute forward and ahead AABB
         double yawRad = Math.toRadians(this.getYRot());
         Vec3 forward = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
         AABB hitbox = this.getBoundingBox().move(forward.scale(0.6)).inflate(0.6);
-
-        // Collect targets
         java.util.List<Entity> entities = level.getEntities(this, hitbox,
                 e -> e instanceof LivingEntity && e != this && !e.isPassengerOfSameVehicle(this));
-
         if (entities.isEmpty()) return;
-
-        // Convert speed to blocks/second for correct damage scaling
         double speedBps = currentSpeed * 20.0;
-
-        // Brake immediately on impact to prevent tunneling
         currentSpeed = 0.0;
-
         for (Entity e : entities) {
             if (!(e instanceof LivingEntity living)) continue;
-
-            // Skip creative/spectator players
             if (living instanceof Player p && (p.isCreative() || p.isSpectator())) continue;
-
-            // Hearts = 2 × bps  → HP = 4 × bps (exactly as specified)
             float damageHp = (float)(speedBps * 4.0);
-
-            // Apply unmitigated damage so armor/resistance can't reduce it
             living.hurt(DamageSource.OUT_OF_WORLD, damageHp);
-
-            // Knockback scaled by real bps; sensible caps
             double kb = Math.min(0.5 + speedBps / 3.0, 10.0);
             double up = Math.min(0.20 + speedBps / 50.0, 1.0);
             Vec3 fling = new Vec3(forward.x, up, forward.z).normalize().scale(kb);
             living.push(fling.x, fling.y, fling.z);
             living.hasImpulse = true;
-
-            dlog(DBG_COLLISION_EVENTS, String.format(
-                    "Hit %s | speed=%.2f b/s | dmg=%.1f HP | kb=%.2f",
-                    living.getName().getString(), speedBps, damageHp, kb));
         }
     }
-
-    /* -------------------------------------------------------------------------
-     *                             DRIVE / REVERSE / PARK
-     * ------------------------------------------------------------------------- */
 
     private void handleDriveMode()  { accelerateAndMove(false); }
     private void handleReverseMode(){ accelerateAndMove(true);  }
     private void handleParkMode()   { currentSpeed = 0.0; currentTurnRate *= 0.5f; }
 
     private void accelerateAndMove(boolean reverse) {
-        // Speed integration (per-tick)
+        if (recoilTicks > 0) {
+            applyRecoilStep();
+            double yawRadRecoil = Math.toRadians(this.getYRot());
+            applyTerrainAndProximityTilt(yawRadRecoil);
+            return;
+        }
+
         double targetMax = reverse ? MAX_SPEED * 0.5 : MAX_SPEED;
         double accel     = reverse ? ACCEL_FACTOR * 0.75 : ACCEL_FACTOR;
 
-        if (accelerating) {
-            currentSpeed += accel * (targetMax - currentSpeed);
-        } else if (braking) {
-            currentSpeed -= BRAKE_FACTOR * currentSpeed;
-        } else {
+        if (accelerating) currentSpeed += accel * (targetMax - currentSpeed);
+        else if (braking) currentSpeed -= BRAKE_FACTOR * currentSpeed;
+        else {
             currentSpeed -= DRAG;
             if (currentSpeed < IDLE_SPEED) currentSpeed = IDLE_SPEED;
         }
@@ -424,16 +325,14 @@ public class CardemoEntity extends Mob implements IAnimatable {
         if (currentSpeed < 0) currentSpeed = 0;
         if (currentSpeed > targetMax) currentSpeed = targetMax;
 
-        // Steering integration with inertia toward desired
         float desiredTurn = 0f;
-        if (turningLeft && !turningRight)  desiredTurn = -MAX_TURN_RATE;
-        if (turningRight && !turningLeft)  desiredTurn =  MAX_TURN_RATE;
+        if (turningLeft && !turningRight) desiredTurn = -MAX_TURN_RATE;
+        if (turningRight && !turningLeft) desiredTurn = MAX_TURN_RATE;
         if (reverse) desiredTurn *= -1f;
 
         float deltaTurn = (desiredTurn - currentTurnRate) * TURN_ACCEL;
         currentTurnRate += deltaTurn;
 
-        // Dynamic recentering when no input (less snap at higher speed)
         if (!turningLeft && !turningRight) {
             float speedRatio = (float)(currentSpeed / MAX_SPEED);
             float centerFactor = 0.85f + 0.15f * (1 - speedRatio);
@@ -441,98 +340,247 @@ public class CardemoEntity extends Mob implements IAnimatable {
             if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0f;
         }
 
-        // Yaw integration
         this.setYRot(this.getYRot() + currentTurnRate);
         double yawRad = Math.toRadians(this.getYRot());
 
-        // Forward vector * speed (per tick)
+        // ---------------------------------------------------------------------
+        // 🧩 BUMP DETECTION (added)
+        // ---------------------------------------------------------------------
+        if (!reverse && currentSpeed > 0.05 && recoilCooldown == 0) {
+            if (isBlockedAheadOrTooSteep(yawRad)) {
+                triggerRecoil(yawRad);
+                applyTerrainAndProximityTilt(yawRad);
+                return;
+            }
+        }
+
         double motionX = reverse ?  Math.sin(yawRad) * currentSpeed : -Math.sin(yawRad) * currentSpeed;
         double motionZ = reverse ? -Math.cos(yawRad) * currentSpeed :  Math.cos(yawRad) * currentSpeed;
 
-        // Slope-friendly tiny boost while grounded
         double verticalBoost = 0.0;
         if (this.onGround && currentSpeed > 0.05)
             verticalBoost = 0.1 * Math.min(1.0, currentSpeed / MAX_SPEED);
 
-        // Commit motion
         Vec3 motion = new Vec3(motionX, getDeltaMovement().y + verticalBoost, motionZ);
         setDeltaMovement(motion);
         hasImpulse = true;
-
         move(MoverType.SELF, motion);
-
-        // Tilt after move based on new position
         applyTerrainAndProximityTilt(yawRad);
     }
 
-    /* -------------------------------------------------------------------------
-     *                               TILT CALCULATION
-     * ------------------------------------------------------------------------- */
+// ==========================================================================
+// BUMP / RECOIL IMPLEMENTATION — simple, robust ascent-only detection
+// ==========================================================================
 
     /**
-     * Computes pitch and roll using both terrain height deltas and proximity to
-     * lateral obstacles. Roll is the sum of a gentle terrain roll and a
-     * proximity roll that leans the car AWAY from closer walls.
+     * Detects a true, unclimbable rise (or solid wall) directly ahead.
      *
-     * SERVER: computes and stores visualRoll; also pushes ROLL_SYNC every tick.
-     * CLIENT: does not compute; it reads ROLL_SYNC in getVisualRoll().
+     * Strategy (speed-invariant, ascent-only):
+     *  1) Ground step check at 0.5, 1.0, 1.5, 2.0 blocks ahead:
+     *     - If any *upward* step exceeds maxUpStep (with a small margin), bump.
+     *  2) Forward rays (center and ±0.35 wide) at two heights (0.6, 1.2) for 2.0 blocks:
+     *     - If a ray hits a solid block whose *hit Y* is above (groundY + climbCap), bump.
+     *  Notes:
+     *    - Descents are ignored entirely.
+     *    - Tiny rises (< 0.12) are ignored to prevent noise.
+     *    - Fixed lookahead (2.0) avoids high-speed temporal artifacts while remaining predictable.
      */
+    private boolean isBlockedAheadOrTooSteep(double yawRad) {
+        if (recoilTicks > 0) return false;
+
+        final double lookahead = 2.0;                      // fixed, predictable range
+        final double tinyNoise = 0.12;                     // ignore micro rises
+        final double climbCap  = this.maxUpStep + 0.05;    // what we can climb per block
+
+        Vec3 forward = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad)).normalize();
+        Vec3 here    = this.position();
+        double hereY = getGroundY(here);
+
+        // ----------------------------------------------------------------------
+        // (A) Step check on the ground line directly ahead (ascent-only)
+        // ----------------------------------------------------------------------
+        double lastY = hereY;
+        for (double dist = 0.5; dist <= lookahead + 1e-6; dist += 0.5) {
+            Vec3 p = here.add(forward.scale(dist));
+            double y = getGroundY(p);
+            double rise = y - lastY;
+
+            if (rise <= 0) { // ignore descents or flat
+                lastY = y;
+                continue;
+            }
+            if (rise < tinyNoise) { // ignore very small jiggle
+                lastY = y;
+                continue;
+            }
+
+            // Abrupt rise (true step) exceeds climb capability → bump
+            if (rise > climbCap) {
+                dlog(DBG_BUMP_LOGS, String.format("BUMP: step rise=%.2f > climbCap=%.2f at dist=%.1f",
+                        rise, climbCap, dist));
+                return true;
+            }
+            lastY = y;
+        }
+
+        // ----------------------------------------------------------------------
+        // (B) Wall/solid check with simple forward rays at two heights
+        // ----------------------------------------------------------------------
+        final double[] lateral = { 0.0, +0.35, -0.35 };
+        final double[] heights = { 0.6, 1.2 };
+        Vec3 right = new Vec3(Math.cos(yawRad), 0, Math.sin(yawRad));
+
+        for (double h : heights) {
+            for (double lat : lateral) {
+                Vec3 origin = new Vec3(this.getX(), hereY, this.getZ())
+                        .add(right.scale(lat))
+                        .add(0.0, h, 0.0);
+                Vec3 end = origin.add(forward.scale(lookahead));
+
+                net.minecraft.world.level.ClipContext ctx =
+                        new net.minecraft.world.level.ClipContext(
+                                origin, end,
+                                net.minecraft.world.level.ClipContext.Block.COLLIDER,
+                                net.minecraft.world.level.ClipContext.Fluid.NONE,
+                                this
+                        );
+                net.minecraft.world.phys.HitResult hit = this.level.clip(ctx);
+                if (hit != null && hit.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK) {
+                    net.minecraft.world.phys.BlockHitResult bhr = (net.minecraft.world.phys.BlockHitResult) hit;
+                    BlockPos pos = bhr.getBlockPos();
+                    var state = level.getBlockState(pos);
+
+                    // solid enough to matter?
+                    boolean solid = !state.isAir() &&
+                            (state.getMaterial().isSolid() || !state.getCollisionShape(level, pos).isEmpty());
+                    if (!solid) continue;
+
+                    // Ascents only: compare the *hit location Y* vs our local ground
+                    double hitY = hit.getLocation().y;
+                    double riseFromGround = hitY - hereY;
+
+                    if (riseFromGround > climbCap) {
+                        dlog(DBG_BUMP_LOGS, String.format(
+                                "BUMP: wall/solid ahead (hitY rise=%.2f > climbCap=%.2f) at %s",
+                                riseFromGround, climbCap, pos));
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /** Initiates recoil motion, cancels forward movement, plays thunk. */
+    private void triggerRecoil(double yawRad) {
+        if (recoilTicks > 0 || recoilCooldown > 0) return;
+
+        this.recoilDirection = new Vec3(Math.sin(yawRad), 0, -Math.cos(yawRad)).normalize();
+        this.recoilTicks = RECOIL_DURATION;
+        this.recoilProgress = 0.0;
+
+        // Stop forward motion immediately
+        this.currentSpeed = 0.0;
+        setDeltaMovement(new Vec3(0, getDeltaMovement().y, 0));
+
+        // Metallic thunk (server-side broadcast)
+        if (!this.level.isClientSide) {
+            this.level.playSound(
+                    null,
+                    this.blockPosition(),
+                    SoundEvents.ANVIL_PLACE,
+                    SoundSource.BLOCKS,
+                    BUMP_VOL,
+                    BUMP_PITCH
+            );
+        }
+    }
+
+    /** Applies one step of the recoil using a quadratic ease-out curve. */
+    private void applyRecoilStep() {
+        if (recoilTicks <= 0) return;
+
+        double tPrev = recoilProgress;
+        double tNext = (RECOIL_DURATION - recoilTicks + 1) / (double) RECOIL_DURATION;
+        recoilProgress = tNext;
+
+        // Ease-out: f(t) = 1 - (1 - t)^2
+        double easePrev = 1.0 - Math.pow(1.0 - tPrev, 2.0);
+        double easeNext = 1.0 - Math.pow(1.0 - tNext, 2.0);
+        double distThisTick = (easeNext - easePrev) * RECOIL_TOTAL_DIST;
+
+        Vec3 step = recoilDirection.scale(distThisTick);
+        move(MoverType.SELF, step);
+
+        recoilTicks--;
+        if (recoilTicks <= 0) {
+            recoilCooldown = RECOIL_COOLDOWN;
+            recoilDirection = Vec3.ZERO;
+            recoilProgress = 0.0;
+        }
+    }
+
+// ==========================================================================
+// END BUMP / RECOIL IMPLEMENTATION
+// ==========================================================================
+
+
+    // ==========================================================================
+    // TILT CALCULATION (PITCH + ROLL COMBINED)
+    // ==========================================================================
+
     private void applyTerrainAndProximityTilt(double yawRad) {
         final double sampleDistance = 0.8;
 
-        // Basis vectors
+        // Basis
         Vec3 forward = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
         Vec3 right   = new Vec3(Math.cos(yawRad),  0, Math.sin(yawRad));
 
-        // Sample positions around the car
+        // Sample points around the car
         Vec3 frontPos = position().add(forward.scale(sampleDistance));
         Vec3 backPos  = position().add(forward.scale(-sampleDistance));
         Vec3 rightPos = position().add(right.scale(sampleDistance));
         Vec3 leftPos  = position().add(right.scale(-sampleDistance));
 
-        // Ceiling-safe ground heights
+        // Ground heights (ceiling-safe)
         double frontY = getGroundY(frontPos);
         double backY  = getGroundY(backPos);
         double rightY = getGroundY(rightPos);
         double leftY  = getGroundY(leftPos);
 
-        // ---- Pitch (XRot) from front-back slope
+        // Pitch from front/back
         float pitchTarget = (float) Math.toDegrees(Math.atan2(frontY - backY, sampleDistance * 2.0)) * -1F;
         if (pitchTarget > 60f) pitchTarget = 60f;
         if (pitchTarget < -60f) pitchTarget = -60f;
         float newPitch = lerp(getXRot(), pitchTarget, 0.25f);
         setXRot(newPitch);
 
-        // ---- Terrain roll (gentle)
+        // Roll: terrain + proximity
         double dyRoll = leftY - rightY;
         float rawTerrainRoll = (float) Math.toDegrees(Math.atan2(dyRoll, sampleDistance * 2.0));
         if (rawTerrainRoll >  TERRAIN_ROLL_CLAMP_DEG) rawTerrainRoll =  TERRAIN_ROLL_CLAMP_DEG;
         if (rawTerrainRoll < -TERRAIN_ROLL_CLAMP_DEG) rawTerrainRoll = -TERRAIN_ROLL_CLAMP_DEG;
         float terrainRoll = rawTerrainRoll;
 
-        // ---- Proximity roll (lean away from closer side)
         float leftClose  = computeSideCloseness(true,  yawRad);
         float rightClose = computeSideCloseness(false, yawRad);
-        float diff = (leftClose - rightClose); // >0 => left closer => lean right (away from left)
+        float diff = (leftClose - rightClose);
         if (Math.abs(diff) < PROX_DEADZONE) diff = 0f;
         float proximityRoll = diff * PROX_ROLL_CLAMP_DEG;
 
-        // ---- Combine and smooth
         float targetRoll = terrainRoll + proximityRoll;
         if (targetRoll >  TOTAL_ROLL_CLAMP_DEG) targetRoll =  TOTAL_ROLL_CLAMP_DEG;
         if (targetRoll < -TOTAL_ROLL_CLAMP_DEG) targetRoll = -TOTAL_ROLL_CLAMP_DEG;
 
         visualRoll = lerp(visualRoll, targetRoll, ROLL_SMOOTH);
 
-        // Sync for clients
-        if (!level.isClientSide) {
-            this.entityData.set(ROLL_SYNC, visualRoll);
-        }
+        // Sync to clients
+        if (!level.isClientSide) this.entityData.set(ROLL_SYNC, visualRoll);
     }
 
     /**
-     * Side closeness scanner: returns 0..1 where 1 = wall pressed right next
-     * to that side, 0 = no obstacle within SIDE_CHECK_DIST.
+     * Side closeness scanner for wall-aware roll. Returns value in [0,1].
      */
     private float computeSideCloseness(boolean leftSide, double yawRad) {
         if (level == null) return 0f;
@@ -544,28 +592,28 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
         float strongest = 0f;
 
-        // Sample along the car’s length
+        // Along the car length
         for (double t = -SIDE_CHECK_HALF_LEN; t <= SIDE_CHECK_HALF_LEN + 1e-6; t += SIDE_CHECK_STEP_LEN) {
             Vec3 along = forward.scale(t);
 
-            // Cast outward rays perpendicular to heading
+            // Outward rays
             for (double s = 0.0; s <= SIDE_CHECK_DIST + 1e-6; s += 0.15) {
                 Vec3 base = position().add(along).add(sideDir.scale(s));
 
-                // Vertical sampling (to catch fences, slabs, etc.)
+                // Vertical samples
                 for (double yoff = SIDE_CHECK_Y_START; yoff <= SIDE_CHECK_Y_END + 1e-6; yoff += SIDE_CHECK_Y_STEP) {
                     BlockPos bp = new BlockPos(
                             (int) Math.floor(base.x),
-                            (int) Math.floor(this.getY() + yoff - 0.2), // slight downward bias
+                            (int) Math.floor(this.getY() + yoff - 0.2),
                             (int) Math.floor(base.z)
                     );
                     var state = level.getBlockState(bp);
 
-                    // Count as obstacle if solid or has any collision shape
+                    // Solid or any collision shape counts
                     if (!state.isAir() && (state.getMaterial().isSolid() || !state.getCollisionShape(level, bp).isEmpty())) {
                         float frac = (float) (1.0 - (s / SIDE_CHECK_DIST));
                         if (frac > strongest) strongest = frac;
-                        // stop probing outward for this slice — obstacle found
+                        // Stop this outward slice once obstacle is found
                         break;
                     }
                 }
@@ -578,8 +626,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
     }
 
     /**
-     * Finds the actual ground height below the position by scanning down a few
-     * blocks to avoid sampling ceilings when under bridges/tunnels.
+     * Ceiling-safe ground height finder to avoid sampling tunnel/bridge ceilings.
      */
     private double getGroundY(Vec3 pos) {
         int startY = (int) Math.floor(pos.y);
@@ -588,19 +635,19 @@ public class CardemoEntity extends Mob implements IAnimatable {
         for (int y = startY; y >= startY - 8 && y >= minY; y--) {
             BlockPos check = new BlockPos((int) Math.floor(pos.x), y, (int) Math.floor(pos.z));
             if (!level.getBlockState(check).isAir()) {
-                // first solid block; ground is its top face
+                // First solid block found; ground is its top face
                 return y + 1.0;
             }
         }
 
-        // fallback to heightmap
+        // Heightmap fallback
         return level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
                 (int) Math.floor(pos.x), (int) Math.floor(pos.z));
     }
 
-    /* -------------------------------------------------------------------------
-     *                       DIMENSIONS / BOUNDING BOX OVERRIDES
-     * ------------------------------------------------------------------------- */
+    // ==========================================================================
+    // DIMENSIONS / BOUNDING BOX OVERRIDES
+    // ==========================================================================
 
     @Override
     public EntityDimensions getDimensions(Pose pose) {
@@ -621,9 +668,9 @@ public class CardemoEntity extends Mob implements IAnimatable {
         ));
     }
 
-    /* -------------------------------------------------------------------------
-     *                                 RIDING
-     * ------------------------------------------------------------------------- */
+    // ==========================================================================
+    // RIDING / PASSENGER POSITIONING
+    // ==========================================================================
 
     @Override
     public void positionRider(Entity passenger) {
@@ -634,23 +681,21 @@ public class CardemoEntity extends Mob implements IAnimatable {
         }
     }
 
-    /* -------------------------------------------------------------------------
-     *                               INTERACTION
-     * ------------------------------------------------------------------------- */
+    // ==========================================================================
+    // PLAYER INTERACTION (LOCK/DOOR/ENTER)
+    // ==========================================================================
 
     @Override
     public InteractionResult mobInteract(Player player, InteractionHand hand) {
         boolean sneaking = player.isShiftKeyDown();
         boolean client   = this.level.isClientSide;
 
-        // Sneak: toggle door if unlocked
         if (sneaking) {
             if (!client) {
                 if (isLocked()) {
                     player.displayClientMessage(net.minecraft.network.chat.Component.literal("Car is locked."), true);
                     return InteractionResult.FAIL;
                 }
-
                 if (isDoorOpen()) {
                     playDoorSound(false, player);
                     setAnimation("r_door_close");
@@ -664,7 +709,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
             return InteractionResult.SUCCESS;
         }
 
-        // Normal interact: enter if unlocked + door open
         if (!client) {
             if (isLocked()) {
                 player.displayClientMessage(net.minecraft.network.chat.Component.literal("Car is locked."), true);
@@ -701,9 +745,9 @@ public class CardemoEntity extends Mob implements IAnimatable {
         );
     }
 
-    /* -------------------------------------------------------------------------
-     *                             ATTRIBUTES / SPAWN
-     * ------------------------------------------------------------------------- */
+    // ==========================================================================
+    // ATTRIBUTES / SPAWN RULES
+    // ==========================================================================
 
     public static void init() {
         SpawnPlacements.register(
@@ -726,23 +770,19 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 .add(Attributes.FOLLOW_RANGE, 16);
     }
 
-    /* -------------------------------------------------------------------------
-     *                         PUSH / KNOCKBACK BEHAVIOR
-     * ------------------------------------------------------------------------- */
+    // ==========================================================================
+    // PUSH / KNOCKBACK BEHAVIOR
+    // ==========================================================================
 
     @Override
-    public void knockback(double strength, double x, double z) {
-        // No knockback for the vehicle itself
-    }
+    public void knockback(double strength, double x, double z) { }
 
     @Override
-    public boolean isPushable() {
-        return false;
-    }
+    public boolean isPushable() { return false; }
 
-    /* -------------------------------------------------------------------------
-     *                             ANIMATION HOOKS
-     * ------------------------------------------------------------------------- */
+    // ==========================================================================
+    // ANIMATION HOOKS (GECKOLIB)
+    // ==========================================================================
 
     private <E extends IAnimatable> PlayState movementPredicate(AnimationEvent<E> event) {
         if (this.animationProcedure.equals("empty")) {
@@ -776,25 +816,19 @@ public class CardemoEntity extends Mob implements IAnimatable {
     @Override
     public AnimationFactory getFactory() { return this.factory; }
 
-    /* -------------------------------------------------------------------------
-     *                          RENDERER-FACING ACCESSORS
-     * ------------------------------------------------------------------------- */
+    // ==========================================================================
+    // RENDERER-FACING ACCESSORS
+    // ==========================================================================
 
-    /**
-     * The renderer reads this via entity.getVisualRoll().
-     * Client returns the synced ROLL_SYNC for SP/MP consistency.
-     */
     @OnlyIn(Dist.CLIENT)
     public float getVisualRoll() {
-        if (this.level != null && this.level.isClientSide) {
-            return this.entityData.get(ROLL_SYNC);
-        }
+        if (this.level != null && this.level.isClientSide) return this.entityData.get(ROLL_SYNC);
         return visualRoll;
     }
 
-    /* -------------------------------------------------------------------------
-     *                                  MATH UTILS
-     * ------------------------------------------------------------------------- */
+    // ==========================================================================
+    // MATH UTILS
+    // ==========================================================================
 
     private static float lerp(float a, float b, float t) {
         return a + (b - a) * t;
