@@ -15,7 +15,8 @@ import com.mojang.math.Vector3f;
 
 public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
 
-    private float smoothedPitch = 0f; // persistent smoothed angle
+    private float smoothedPitch = 0f; // persistent pitch smoothing
+    private float smoothedRoll = 0f;  // persistent roll smoothing
 
     public CardemoRenderer(EntityRendererProvider.Context renderManager) {
         super(renderManager, new CardemoModel());
@@ -26,21 +27,25 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
     public void applyRotations(CardemoEntity entity, PoseStack stack, float ageInTicks, float rotationYaw, float partialTicks) {
         super.applyRotations(entity, stack, ageInTicks, rotationYaw, partialTicks);
 
-        // 1️⃣ Raw input from entity
+        // --- Pitch smoothing ---
         float targetPitch = entity.getXRot();
-
-        // 2️⃣ Smooth it with exponential damping
-        //    The closer smoothingFactor is to 1, the slower & smoother the motion.
-        float smoothingFactor = 0.1f; // try 0.05f for even slower smoothing
-        smoothedPitch += (targetPitch - smoothedPitch) * smoothingFactor;
-
-        // 3️⃣ Convert to visual tilt (flip + amplify)
+        float pitchSmoothFactor = 0.1f;
+        smoothedPitch += (targetPitch - smoothedPitch) * pitchSmoothFactor;
         float adjustedPitch = -smoothedPitch * 1.8f;
 
-        // 4️⃣ Apply tilt
+        // --- Roll smoothing ---
+        float targetRoll = entity.getVisualRoll(); // from entity (already smoothed server-side)
+        float rollSmoothFactor = 0.15f; // slightly faster than pitch
+        smoothedRoll += (targetRoll - smoothedRoll) * rollSmoothFactor;
+
+        // --- Apply transformations in logical order ---
+        // 1. Roll (Z-axis)
+        stack.mulPose(Vector3f.ZP.rotationDegrees(smoothedRoll));
+
+        // 2. Pitch (X-axis)
         stack.mulPose(Vector3f.XP.rotationDegrees(adjustedPitch));
 
-        // 5️⃣ Apply lift proportional to tilt (suspension rise)
+        // 3. Lift (suspension)
         float liftAmount = Math.abs(smoothedPitch) * 0.025f;
         stack.translate(0, liftAmount, 0);
     }

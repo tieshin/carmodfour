@@ -13,6 +13,7 @@ import software.bernie.geckolib3.core.IAnimatable;
 import net.minecraftforge.network.PlayMessages;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.Level;
@@ -38,11 +39,9 @@ import net.minecraft.client.Minecraft;
 
 import net.mcreator.carmodfour.init.CarmodfourModEntities;
 
-// === Added imports for collision damage/knockback ===
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.damagesource.DamageSource;
 
-// === Added imports for sounds ===
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 
@@ -79,7 +78,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
     private static final float MAX_TURN_RATE = 4.0f;
     private static final float TURN_ACCEL = 0.25f;
 
-    // === Custom hitbox ===
+    // Custom hitbox
     private static final float HITBOX_WIDTH = 2.5f;
     private static final float HITBOX_HEIGHT = 1.0f;
     private static final float HITBOX_LENGTH = 2.5f;
@@ -87,11 +86,15 @@ public class CardemoEntity extends Mob implements IAnimatable {
     @OnlyIn(Dist.CLIENT)
     private long entryStartTime = 0L;
 
-    // === Added: client-side speed gauge state ===
+    // Client-side HUD speed state
     @OnlyIn(Dist.CLIENT)
     private Vec3 clientPrevPos = null;
     @OnlyIn(Dist.CLIENT)
     private double clientSpeedBps = 0.0;
+
+    // === New: smoothed visual roll (applied by renderer) ===
+    // Stored on the entity so the renderer can read it safely.
+    private float visualRoll = 0.0f; // degrees, right-hand rule about +Z
 
     public CardemoEntity(PlayMessages.SpawnEntity packet, Level world) {
         this(CarmodfourModEntities.CARDEMO.get(), world);
@@ -131,7 +134,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
     public String getTexture() { return this.entityData.get(TEXTURE); }
     public String getSyncedAnimation() { return this.entityData.get(ANIMATION); }
     public void setAnimation(String name) { this.entityData.set(ANIMATION, name); }
-
     public void setAnimationProcedure(String animation) { setAnimation(animation); }
 
     @Override
@@ -151,6 +153,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         tag.putString("DriveState", getDriveState().name());
         tag.putString("VehicleState", getState().name());
         tag.putBoolean("DoorOpen", isDoorOpen());
+        // visualRoll is a visual-only transient; omit from save
     }
 
     @Override
@@ -319,7 +322,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         applyTerrainTilt(yawRad, tickDelta);
     }
 
-    // === Hitbox shape ===
+    // Hitbox shape
     @Override
     public EntityDimensions getDimensions(Pose pose) {
         return EntityDimensions.fixed(HITBOX_WIDTH, HITBOX_HEIGHT);
@@ -339,25 +342,85 @@ public class CardemoEntity extends Mob implements IAnimatable {
         ));
     }
 
+    /**
+     * Computes terrain-based pitch (XRot) and a subtle roll (visualRoll).
+     * - Pitch is from front/back height difference (clamped to ±60°).
+     * - Roll is from left/right height difference (clamped to ±22.5°),
+     *   and only applied when actually on a ramp (|pitch| above a small threshold).
+     *
+     * Updated to avoid "ceiling magnetism": uses downward ground scanning via getGroundY().
+     */
     private void applyTerrainTilt(double yawRad, float tickDelta) {
-        double sampleDistance = 0.8;
+        final double sampleDistance = 0.8;
+
+        // Basis vectors
         Vec3 forwardVec = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
+        Vec3 rightVec   = new Vec3(Math.cos(yawRad), 0, Math.sin(yawRad));
 
+        // Sample points
         Vec3 frontPos = this.position().add(forwardVec.scale(sampleDistance));
-        Vec3 backPos = this.position().add(forwardVec.scale(-sampleDistance));
+        Vec3 backPos  = this.position().add(forwardVec.scale(-sampleDistance));
+        Vec3 rightPos = this.position().add(rightVec.scale(sampleDistance));
+        Vec3 leftPos  = this.position().add(rightVec.scale(-sampleDistance));
 
-        double frontY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) frontPos.x, (int) frontPos.z);
-        double backY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) backPos.x, (int) backPos.z);
+        // === Ceiling-safe heights ===
+        double frontY = getGroundY(frontPos);
+        double backY  = getGroundY(backPos);
+        double rightY = getGroundY(rightPos);
+        double leftY  = getGroundY(leftPos);
 
-        double dy = frontY - backY;
-        double dx = sampleDistance * 2;
+        // --- Pitch (front-back)
+        double dyPitch = frontY - backY;
+        double dxPitch = sampleDistance * 2.0;
+        float targetPitch = (float) Math.toDegrees(Math.atan2(dyPitch, dxPitch)) * -1F;
 
-        float targetPitch = (float)Math.toDegrees(Math.atan2(dy, dx)) * -1F;
-        targetPitch = Math.max(-30F, Math.min(30F, targetPitch));
+        // Clamp to ±60°
+        targetPitch = Math.max(-60F, Math.min(60F, targetPitch));
 
-        float smoothing = 0.3F;
-        float newPitch = this.getXRot() + (targetPitch - this.getXRot()) * smoothing;
+        // Smooth pitch toward target
+        float pitchSmoothing = 0.3F;
+        float newPitch = this.getXRot() + (targetPitch - this.getXRot()) * pitchSmoothing;
         this.setXRot(newPitch);
+
+        // --- Roll (left-right), only when actually on a ramp
+        double dyRoll = leftY - rightY;
+        double dxRoll = sampleDistance * 2.0;
+        float rawRoll = (float) Math.toDegrees(Math.atan2(dyRoll, dxRoll));
+
+        // Apply roll only if we're really climbing/descending (avoid flat-ground lean)
+        float pitchAbs = Math.abs(targetPitch);
+        float rollFactor = (pitchAbs > 2.5F) ? Math.min(1.0F, pitchAbs / 45F) : 0.0F;
+        float targetRoll = rawRoll * rollFactor;
+
+        // Clamp roll to ±22.5°
+        if (targetRoll > 22.5F) targetRoll = 22.5F;
+        if (targetRoll < -22.5F) targetRoll = -22.5F;
+
+        // Smooth roll independently
+        float rollSmoothing = 0.25F; // similar to pitch but a touch tighter
+        visualRoll += (targetRoll - visualRoll) * rollSmoothing;
+    }
+
+    /**
+     * Finds the actual ground height directly below the given sample position
+     * by scanning down a few blocks. This prevents the car from being
+     * "attracted" to ceilings when under bridges/tunnels, because we ignore
+     * higher structures and only consider the closest surface under the sample.
+     */
+    private double getGroundY(Vec3 pos) {
+        // Scan downward up to 8 blocks from the sample height
+        int startY = (int) Math.floor(pos.y);
+        int minY = level.getMinBuildHeight();
+        for (int y = startY; y >= startY - 8 && y >= minY; y--) {
+            net.minecraft.core.BlockPos check = new net.minecraft.core.BlockPos((int) Math.floor(pos.x), y, (int) Math.floor(pos.z));
+            if (!level.getBlockState(check).isAir()) {
+                // Return top surface of the first solid block found
+                return y + 1.0;
+            }
+        }
+        // Fallback to heightmap if nothing is found below within the scan range
+        // (keeps behavior sane over voids or unusual terrain)
+        return level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) Math.floor(pos.x), (int) Math.floor(pos.z));
     }
 
     @OnlyIn(Dist.CLIENT)
@@ -373,6 +436,11 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
         String text = String.format("| %s | %s | %s | || %.1f b/s", p, d, r, clientSpeedBps);
         mc.gui.setOverlayMessage(net.minecraft.network.chat.Component.literal(text), false);
+    }
+
+    @OnlyIn(Dist.CLIENT)
+    public float getVisualRoll() {
+        return visualRoll;
     }
 
     @Override
