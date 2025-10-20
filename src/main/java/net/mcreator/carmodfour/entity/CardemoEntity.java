@@ -385,90 +385,155 @@ public class CardemoEntity extends Mob implements IAnimatable {
         hasImpulse = true;
         move(MoverType.SELF, motion);
         applyTerrainAndProximityTilt(yawRad);
+
+        // Maintain a short grace window after recent forward motion
+        if (!reverse) {
+            if (currentSpeed > 0.05) {
+                forwardGraceTicks = FORWARD_GRACE_MAX;
+            } else if (forwardGraceTicks > 0) {
+                forwardGraceTicks--;
+            }
+        }
     }
 
+
+
 // ==========================================================================
-// BUMP / RECOIL IMPLEMENTATION — front and rear adaptive detection
+// BUMP / RECOIL IMPLEMENTATION — full-block climbable (air-above aware)
 // ==========================================================================
+
+    // --- Motion grace buffer (prevents false bumps when slowing or coasting) ---
+    private int forwardGraceTicks = 0;
+    private static final int FORWARD_GRACE_MAX = 6; // ~0.3 s grace at 20 TPS
+
+    // --- Probe sampling parameters ---
+    private static final double PROBE_STEP_BASE = 0.25; // fixed sample spacing (m)
+    private static final int    GROUND_SMOOTH_WINDOW = 3; // rolling average window
+    private static final double MAX_CONTINUOUS_SLOPE_DEG = 55.0; // tolerance for hill angle
 
     /**
      * Detects a true, unclimbable rise (or solid wall) directly ahead or behind.
-     * Front detection uses forward vector; rear detection uses inverted vector.
-     *
-     * Notes:
-     *  - Explicitly ignores stairs/slabs using isClimbableBlock().
-     *  - Each side has its own detection pass but shares recoil cooldown.
-     *  - Rear bump detection reaches farther than front.
+     * Handles stairs, slabs, voxel hills, and solid-with-air-above full-block slopes.
      */
     private boolean isBlockedAheadOrTooSteep(double yawRad) {
-        return detectBumpDirection(yawRad, false); // false = forward
+        return detectBumpDirection(yawRad, false);
     }
 
     private boolean isBlockedBehindOrTooSteep(double yawRad) {
-        return detectBumpDirection(yawRad, true);  // true = backward
+        return detectBumpDirection(yawRad, true);
     }
 
     /**
-     * Generic directional bump detection (forward or backward),
-     * with adaptive range and offset for large vehicle body.
+     * Generic directional bump detection — continuous-slope and air-above aware.
      */
     private boolean detectBumpDirection(double yawRad, boolean reverse) {
         if (recoilTicks > 0) return false;
 
-        // ======================================================================
-        // Dynamic lookahead:
-        //  - Front reverted to original 2.0 m range
-        //  - Rear remains longer for bumper overhang
-        //  - Slight adaptive component for slow-speed precision
-        // ======================================================================
-        double speed = Math.abs(currentSpeed);
-        double baseLookahead = reverse ? 2.6 : 1.5;          // reverted front, extended rear
-        double adaptive = 0.4 + Math.min(1.0, speed * 8.0);  // 0.4–1.4 adaptive margin
-        final double lookahead = baseLookahead + adaptive;   // ≈2.4–3.4 rear, ≈2.0–2.8 front
+        // Grace period
+        if (!reverse && forwardGraceTicks > 0 && currentSpeed < 0.05)
+            return false;
+
+        // Fixed lookahead (front = 2 m, rear = 3 m)
+        final double lookahead = reverse ? 3.0 : 2.0;
         final double tinyNoise = 0.12;
         final double climbCap  = this.maxUpStep + 0.05;
 
-        // Direction vectors
+        // Lag compensation (TPS scaling)
+        double tickScale = 1.0;
+        if (level != null && level.getServer() != null) {
+            double tps = Math.max(10.0, level.getServer().getAverageTickTime() > 0
+                    ? 1000.0 / level.getServer().getAverageTickTime()
+                    : 20.0);
+            tickScale = 20.0 / tps;
+        }
+
         Vec3 forward = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad)).normalize();
         if (reverse) forward = forward.scale(-1);
 
-        Vec3 here    = this.position();
+        Vec3 here = this.position();
         double hereY = getGroundY(here);
 
-        // ======================================================================
-        // Apply directional offset — treat bumper edges, not entity center
-        // ======================================================================
-        // Front: start 0.6 m ahead; Rear: 1.0 m back for visual overhang
+        // Offset to bumper
         Vec3 originOffset = forward.scale(reverse ? -1.0 : 0.4);
         Vec3 originPos = here.add(originOffset);
 
         // ----------------------------------------------------------------------
-        // (A) Step check on the ground line directly ahead or behind
+        // (A) Continuous ascent-aware probe check — full-block and voxel-slope friendly
         // ----------------------------------------------------------------------
+        double probeStep = PROBE_STEP_BASE * tickScale;
         double lastY = hereY;
-        for (double dist = 0.5; dist <= lookahead + 1e-6; dist += 0.5) {
+        double totalRise = 0.0;
+        double totalRun  = 0.0;
+        int consecutiveSmallRises = 0;
+
+        java.util.ArrayDeque<Double> smoothHeights = new java.util.ArrayDeque<>();
+
+        for (double dist = probeStep; dist <= lookahead + 1e-6; dist += probeStep) {
             Vec3 p = originPos.add(forward.scale(dist));
             double y = getGroundY(p);
-            double rise = y - lastY;
 
-            if (rise <= 0) { lastY = y; continue; }
-            if (rise < tinyNoise) { lastY = y; continue; }
+            smoothHeights.add(y);
+            if (smoothHeights.size() > GROUND_SMOOTH_WINDOW)
+                smoothHeights.removeFirst();
+            double avgY = smoothHeights.stream().mapToDouble(Double::doubleValue).average().orElse(y);
 
-            // Skip bump if stair/slab detected directly at this point
-            BlockPos testPos = new BlockPos(p.x, Math.floor(y - 0.5), p.z);
-            if (isClimbableBlock(testPos)) { lastY = y; continue; }
+            double rise = avgY - lastY;
+            totalRun += probeStep;
 
-            if (rise > climbCap) {
+            // --- Solid-with-air-above logic (voxel hills, 1-block steps) ---
+            BlockPos basePos = new BlockPos(p.x, Math.floor(y - 0.5), p.z);
+            BlockPos abovePos = basePos.above();
+            var baseState = level.getBlockState(basePos);
+            var aboveState = level.getBlockState(abovePos);
+            boolean solid = !baseState.isAir() && baseState.getMaterial().isSolid();
+            boolean airAbove = aboveState.isAir();
+
+            if (solid && airAbove && rise <= (1.0 + 0.15)) {
+                // treat this as a step we can mount
+                lastY = basePos.getY() + 1.0;
+                consecutiveSmallRises++;
+                continue;
+            }
+
+            if (rise > 0) {
+                totalRise += rise;
+
+                // Allow chained 1-block ascents (continuous voxel ramps)
+                if (rise <= (this.maxUpStep + 0.15)) {
+                    consecutiveSmallRises++;
+                    lastY = avgY;
+                    continue;
+                }
+
+                // if multiple small steps in sequence → still climbable
+                double avgSlope = Math.toDegrees(Math.atan2(totalRise, totalRun));
+                if (consecutiveSmallRises >= 2 && avgSlope <= MAX_CONTINUOUS_SLOPE_DEG) {
+                    lastY = avgY;
+                    continue;
+                }
+            }
+
+            if (rise <= tinyNoise) { lastY = avgY; continue; }
+
+            // Skip climbable blocks (stairs/slabs)
+            if (isClimbableBlock(basePos)) { lastY = avgY; continue; }
+
+            // check steep or tall rise
+            double slopeDeg = Math.toDegrees(Math.atan2(rise, probeStep));
+            if (slopeDeg > 70.0 && rise > climbCap) {
                 dlog(DBG_BUMP_LOGS, String.format(
-                        "BUMP (%s): step rise=%.2f > climbCap=%.2f at dist=%.1f",
-                        reverse ? "rear" : "front", rise, climbCap, dist));
+                        "BUMP (%s): slope=%.1f° rise=%.2f > climbCap=%.2f at dist=%.1f",
+                        reverse ? "rear" : "front", slopeDeg, rise, climbCap, dist));
                 return true;
             }
-            lastY = y;
+
+            // reset if descent or flat
+            if (rise <= 0) consecutiveSmallRises = 0;
+            lastY = avgY;
         }
 
         // ----------------------------------------------------------------------
-        // (B) Wall/solid check with forward rays at two heights
+        // (B) Wall/solid check (same as before)
         // ----------------------------------------------------------------------
         final double[] lateral = { 0.0, +0.35, -0.35 };
         final double[] heights = { 0.6, 1.2 };
@@ -476,36 +541,31 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
         for (double h : heights) {
             for (double lat : lateral) {
-                Vec3 origin = originPos
-                        .add(right.scale(lat))
-                        .add(0.0, h, 0.0);
-                Vec3 end = origin.add(forward.scale(lookahead + 0.1)); // small safety margin
+                Vec3 origin = originPos.add(right.scale(lat)).add(0.0, h, 0.0);
+                Vec3 end = origin.add(forward.scale(lookahead + 0.1));
 
-                net.minecraft.world.level.ClipContext ctx =
-                        new net.minecraft.world.level.ClipContext(
-                                origin, end,
-                                net.minecraft.world.level.ClipContext.Block.COLLIDER,
-                                net.minecraft.world.level.ClipContext.Fluid.NONE,
-                                this
-                        );
-                net.minecraft.world.phys.HitResult hit = this.level.clip(ctx);
+                var ctx = new net.minecraft.world.level.ClipContext(
+                        origin, end,
+                        net.minecraft.world.level.ClipContext.Block.COLLIDER,
+                        net.minecraft.world.level.ClipContext.Fluid.NONE,
+                        this
+                );
+                var hit = this.level.clip(ctx);
                 if (hit != null && hit.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK) {
-                    net.minecraft.world.phys.BlockHitResult bhr = (net.minecraft.world.phys.BlockHitResult) hit;
+                    var bhr = (net.minecraft.world.phys.BlockHitResult) hit;
                     BlockPos pos = bhr.getBlockPos();
                     var state = level.getBlockState(pos);
 
-                    boolean solid = !state.isAir() &&
+                    boolean solidWall = !state.isAir() &&
                             (state.getMaterial().isSolid() || !state.getCollisionShape(level, pos).isEmpty());
-                    if (!solid) continue;
-
+                    if (!solidWall) continue;
                     if (isClimbableBlock(pos)) continue;
 
                     double hitY = hit.getLocation().y;
                     double riseFromGround = hitY - hereY;
-
                     if (riseFromGround > climbCap) {
                         dlog(DBG_BUMP_LOGS, String.format(
-                                "BUMP (%s): wall ahead (rise=%.2f > climbCap=%.2f) at %s",
+                                "BUMP (%s): wall rise=%.2f > climbCap=%.2f at %s",
                                 reverse ? "rear" : "front", riseFromGround, climbCap, pos));
                         return true;
                     }
@@ -516,37 +576,32 @@ public class CardemoEntity extends Mob implements IAnimatable {
         return false;
     }
 
-    /**
-     * Returns true if the block at this position is a climbable shape for vehicles —
-     * stairs, slabs, or gentle slope surfaces.
-     */
+    /** Recognizes stairs, slabs, gentle terrain, and solid-with-air-above blocks as climbable. */
     private boolean isClimbableBlock(BlockPos pos) {
         if (level == null) return false;
         var state = level.getBlockState(pos);
         if (state.isAir()) return false;
 
+        // Full solid block with air above = climbable
+        if (state.getMaterial().isSolid() && level.isEmptyBlock(pos.above()))
+            return true;
+
         var block = state.getBlock();
         var key = net.minecraftforge.registries.ForgeRegistries.BLOCKS.getKey(block);
         if (key == null) return false;
 
-        String name = key.getPath(); // e.g. "oak_stairs", "stone_slab"
-
-        return name.contains("stairs")
-                || name.contains("slab")
-                || name.contains("path")
-                || name.contains("carpet")
-                || name.contains("grass_block")
-                || name.contains("gravel");
+        String name = key.getPath();
+        return name.contains("stairs") || name.contains("slab")
+                || name.contains("path") || name.contains("carpet")
+                || name.contains("grass_block") || name.contains("gravel");
     }
 
     /** Initiates recoil motion, cancels movement, plays thunk. */
     private void triggerRecoil(double yawRad, boolean reverseHit) {
         if (recoilTicks > 0 || recoilCooldown > 0) return;
 
-        // Reverse hit pushes forward, front hit pushes backward
-        double directionSign = reverseHit ? -1.0 : 1.0;
-        this.recoilDirection = new Vec3(Math.sin(yawRad) * directionSign, 0, -Math.cos(yawRad) * directionSign).normalize();
-
+        double dirSign = reverseHit ? -1.0 : 1.0;
+        this.recoilDirection = new Vec3(Math.sin(yawRad) * dirSign, 0, -Math.cos(yawRad) * dirSign).normalize();
         this.recoilTicks = RECOIL_DURATION;
         this.recoilProgress = 0.0;
         this.currentSpeed = 0.0;
@@ -585,6 +640,8 @@ public class CardemoEntity extends Mob implements IAnimatable {
 // ==========================================================================
 // END BUMP / RECOIL IMPLEMENTATION
 // ==========================================================================
+
+
 
     // ==========================================================================
     // TILT CALCULATION (PITCH + ROLL COMBINED)
