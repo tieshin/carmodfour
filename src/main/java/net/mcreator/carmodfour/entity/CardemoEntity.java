@@ -233,15 +233,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
     }
 
     @Override
-    public boolean hurt(DamageSource source, float amount) {
-        if (this.isInvulnerableTo(source)) return false;
-        float newHealth = Math.max(0.0F, this.getHealth() - amount);
-        this.setHealth(newHealth);
-        if (newHealth <= 0.0F && !this.level.isClientSide) this.discard();
-        return true;
-    }
-
-    @Override
     public void tick() {
         super.tick();
         if (recoilCooldown > 0) recoilCooldown--;
@@ -257,6 +248,23 @@ public class CardemoEntity extends Mob implements IAnimatable {
         } else updateClientSpeedOverlay();
     }
 
+    // --------------------------------------------------------------------------
+    // CAMERA LURCH VISUAL (shared to renderer)
+    // --------------------------------------------------------------------------
+    @OnlyIn(Dist.CLIENT)
+    public static float cameraLurchPitchOffset = 0f;
+
+    // --------------------------------------------------------------------------
+    // CAMERA LURCH (forward/back impact jolt)
+    // --------------------------------------------------------------------------
+    @OnlyIn(Dist.CLIENT)
+    private static float lurchStrength = 0f;
+    @OnlyIn(Dist.CLIENT)
+    private static int lurchTicks = 0;
+    @OnlyIn(Dist.CLIENT)
+    private static int lurchDuration = 0;
+
+
     @OnlyIn(Dist.CLIENT)
     private void updateClientSpeedOverlay() {
         Vec3 now = this.position();
@@ -267,12 +275,38 @@ public class CardemoEntity extends Mob implements IAnimatable {
             clientSpeedBps = clientSpeedBps * 0.8 + instSpeed * 0.2;
             clientPrevPos = now;
         }
+
         Minecraft mc = Minecraft.getInstance();
         if (mc.player != null && mc.player.isPassengerOfSameVehicle(this) && isEngineOn()) {
+            // --- Drive mode indicators ---
             String p = getDriveState() == DriveState.PARK    ? "( P )" : "P";
             String d = getDriveState() == DriveState.DRIVE   ? "( D )" : "D";
             String r = getDriveState() == DriveState.REVERSE ? "( R )" : "R";
-            String text = String.format("| %s | %s | %s | || %.1f b/s", p, d, r, clientSpeedBps);
+
+            // --- Speed and health stats ---
+            float speed = (float) clientSpeedBps;
+            float hp    = this.getHealth();
+            float maxHp = this.getMaxHealth();
+            int hpInt   = (int) Math.ceil(hp);
+            int maxInt  = (int) Math.ceil(maxHp);
+
+            // --- Determine HP color ---
+            float ratio = hp / maxHp;
+            String colorCode;
+            if (ratio > 0.6f) colorCode = "§a";       // Green (safe)
+            else if (ratio > 0.25f) colorCode = "§e"; // Yellow (moderate)
+            else colorCode = "§c";                    // Red (critical)
+
+            // --- Horn indicator (NEW) ---
+            boolean hornDown = net.mcreator.carmodfour.client.DriveStateKeybindHandler.HORN_KEY.isDown();
+            String horn = hornDown ? "§cH§r" : "H";
+
+            // --- Build final overlay line ---
+            String text = String.format(
+                    "%s || | %s | %s | %s |  ||  %.1f b/s  ||  HP : %s%d§r / %d",
+                    horn, p, d, r, speed, colorCode, hpInt, maxInt
+            );
+
             mc.gui.setOverlayMessage(net.minecraft.network.chat.Component.literal(text), false);
         }
     }
@@ -344,30 +378,63 @@ public class CardemoEntity extends Mob implements IAnimatable {
         double yawRad = Math.toRadians(this.getYRot());
 
         // ---------------------------------------------------------------------
-        // 🧩 BUMP DETECTION (added)
+        // 🧩 BUMP DETECTION (velocity-scaled HP loss + anvil sound intensity)
         // ---------------------------------------------------------------------
         if (currentSpeed > 0.05 && recoilCooldown == 0) {
-            if (!reverse && isBlockedAheadOrTooSteep(yawRad)) {
-                triggerRecoil(yawRad, false); // front hit
+            boolean frontHit = !reverse && isBlockedAheadOrTooSteep(yawRad);
+            boolean rearHit  =  reverse && isBlockedBehindOrTooSteep(yawRad);
+
+            if (frontHit || rearHit) {
+                double impactSpeedBps = Math.abs(currentSpeed * 20.0);
+
+                // Apply HP loss scaled by impact velocity
+                if (impactSpeedBps > 1.5) {
+                    double damage = Math.pow(impactSpeedBps, 1.25) * 0.35;
+                    if (damage < 1.0) damage = 1.0;
+                    this.hurt(DamageSource.GENERIC, (float) damage);
+                }
+
+                // 🔊 Play anvil sound scaled by impact velocity
+                if (!this.level.isClientSide) {
+                    float vol = (float) Math.min(0.2 + (impactSpeedBps / 10.0f) * 0.8f, 1.0f);
+                    float pitch = 0.75f + (float) Math.min(impactSpeedBps / 20.0f, 0.3f);
+                    this.level.playSound(null, this.blockPosition(),
+                            SoundEvents.ANVIL_PLACE, SoundSource.BLOCKS, vol, pitch);
+                }
+
+                triggerRecoil(yawRad, rearHit);
                 applyTerrainAndProximityTilt(yawRad);
                 return;
             }
-            if (reverse && isBlockedBehindOrTooSteep(yawRad)) {
-                triggerRecoil(yawRad, true);  // rear hit
-                applyTerrainAndProximityTilt(yawRad);
-                return;
-            }
-        }  // Preemptive bump clamp — stop forward motion if wall detected right before move
+        }
+
+        // ---------------------------------------------------------------------
+        // 🧱 Preemptive bump clamp — stop forward motion if wall detected right before move
+        // ---------------------------------------------------------------------
         if (recoilCooldown == 0 && currentSpeed > 0.01) {
-            if (!reverse && isBlockedAheadOrTooSteep(yawRad)) {
+            boolean frontHit = !reverse && isBlockedAheadOrTooSteep(yawRad);
+            boolean rearHit  =  reverse && isBlockedBehindOrTooSteep(yawRad);
+
+            if (frontHit || rearHit) {
+                double impactSpeedBps = Math.abs(currentSpeed * 20.0);
                 currentSpeed = 0;
-                triggerRecoil(yawRad, false);
-                applyTerrainAndProximityTilt(yawRad);
-                return;
-            }
-            if (reverse && isBlockedBehindOrTooSteep(yawRad)) {
-                currentSpeed = 0;
-                triggerRecoil(yawRad, true);
+
+                // Apply scaled HP loss
+                if (impactSpeedBps > 1.5) {
+                    double damage = Math.pow(impactSpeedBps, 1.25) * 0.35;
+                    if (damage < 1.0) damage = 1.0;
+                    this.hurt(DamageSource.GENERIC, (float) damage);
+                }
+
+                // 🔊 Velocity-scaled anvil sound
+                if (!this.level.isClientSide) {
+                    float vol = (float) Math.min(0.2 + (impactSpeedBps / 10.0f) * 0.8f, 1.0f);
+                    float pitch = 0.75f + (float) Math.min(impactSpeedBps / 20.0f, 0.3f);
+                    this.level.playSound(null, this.blockPosition(),
+                            SoundEvents.ANVIL_PLACE, SoundSource.BLOCKS, vol, pitch);
+                }
+
+                triggerRecoil(yawRad, rearHit);
                 applyTerrainAndProximityTilt(yawRad);
                 return;
             }
@@ -380,13 +447,29 @@ public class CardemoEntity extends Mob implements IAnimatable {
         if (this.onGround && currentSpeed > 0.05)
             verticalBoost = 0.1 * Math.min(1.0, currentSpeed / MAX_SPEED);
 
+        // ---------------------------------------------------------------------
+        // 🎥 APPLY CAMERA LURCH (client-side forward/recoil motion)
+        // ---------------------------------------------------------------------
+        if (level.isClientSide) {
+            applyCameraLurch(Minecraft.getInstance());
+        }
+
+        // ---------------------------------------------------------------------
+        // 🚗 MOTION + MOVEMENT
+        // ---------------------------------------------------------------------
         Vec3 motion = new Vec3(motionX, getDeltaMovement().y + verticalBoost, motionZ);
         setDeltaMovement(motion);
         hasImpulse = true;
         move(MoverType.SELF, motion);
+
+        // ---------------------------------------------------------------------
+        // 🧭 TERRAIN TILT + WALL PROXIMITY
+        // ---------------------------------------------------------------------
         applyTerrainAndProximityTilt(yawRad);
 
-        // Maintain a short grace window after recent forward motion
+        // ---------------------------------------------------------------------
+        // 🕐 FORWARD GRACE WINDOW — prevent false bumps when coasting
+        // ---------------------------------------------------------------------
         if (!reverse) {
             if (currentSpeed > 0.05) {
                 forwardGraceTicks = FORWARD_GRACE_MAX;
@@ -395,7 +478,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
             }
         }
     }
-
 
 
 // ==========================================================================
@@ -411,6 +493,57 @@ public class CardemoEntity extends Mob implements IAnimatable {
     private static final int    GROUND_SMOOTH_WINDOW = 3; // rolling average window
     private static final double MAX_CONTINUOUS_SLOPE_DEG = 55.0; // tolerance for hill angle
 
+    // --- Prevents multiple bump sounds firing at once (e.g., double anvil overlap) ---
+    private int recentBumpSoundTicks = 0;
+
+    // ==========================================================================
+    // DAMAGE + DEATH HANDLING — silent, death-safe despawn
+    // ==========================================================================
+    @Override
+    public boolean hurt(DamageSource source, float amount) {
+        if (this.isInvulnerableTo(source)) return false;
+
+        // Use vanilla reduction so attributes & events stay correct
+        boolean took = super.hurt(source, amount);
+
+        // Suppress red flash / invulnerability blink
+        this.hurtTime = 0;
+        this.invulnerableTime = 0;
+
+        // Server-side immediate cleanup if dead
+        if (!this.level.isClientSide && !this.isAlive()) {
+            this.discard();
+        }
+        return took;
+    }
+
+    // --------------------------------------------------------------------------
+    // die() override — guarantees despawn for any lethal event
+    // --------------------------------------------------------------------------
+    @Override
+    public void die(DamageSource cause) {
+        super.die(cause); // run vanilla event chain first
+
+        if (!this.level.isClientSide && !this.isRemoved()) {
+            // Small visual & audio flourish
+            if (this.level instanceof net.minecraft.server.level.ServerLevel server) {
+                for (int i = 0; i < 12; i++) {
+                    double ox = (this.random.nextDouble() - 0.5) * 1.5;
+                    double oy = this.random.nextDouble() * 0.8;
+                    double oz = (this.random.nextDouble() - 0.5) * 1.5;
+                    server.sendParticles(ParticleTypes.SMOKE,
+                            this.getX() + ox, this.getY() + oy, this.getZ() + oz,
+                            1, 0, 0, 0, 0.01);
+                }
+            }
+            this.level.playSound(null, this.blockPosition(),
+                    SoundEvents.ANVIL_BREAK, SoundSource.BLOCKS, 0.8f, 0.85f);
+
+            // 🔹 Final guaranteed removal
+            this.discard();
+        }
+    }
+
     /**
      * Detects a true, unclimbable rise (or solid wall) directly ahead or behind.
      * Handles stairs, slabs, voxel hills, and solid-with-air-above full-block slopes.
@@ -425,6 +558,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
     /**
      * Generic directional bump detection — continuous-slope and air-above aware.
+     * (Restored robust version so recoil triggers reliably.)
      */
     private boolean detectBumpDirection(double yawRad, boolean reverse) {
         if (recoilTicks > 0) return false;
@@ -438,7 +572,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         final double tinyNoise = 0.12;
         final double climbCap  = this.maxUpStep + 0.05;
 
-        // Lag compensation (TPS scaling)
+        // Lag compensation (TPS scaling) — left as-is if you want
         double tickScale = 1.0;
         if (level != null && level.getServer() != null) {
             double tps = Math.max(10.0, level.getServer().getAverageTickTime() > 0
@@ -524,6 +658,9 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 dlog(DBG_BUMP_LOGS, String.format(
                         "BUMP (%s): slope=%.1f° rise=%.2f > climbCap=%.2f at dist=%.1f",
                         reverse ? "rear" : "front", slopeDeg, rise, climbCap, dist));
+
+                // if bump impact reduces health to 0, ensure despawn
+                if (!this.level.isClientSide && !this.isAlive()) this.discard();
                 return true;
             }
 
@@ -567,6 +704,8 @@ public class CardemoEntity extends Mob implements IAnimatable {
                         dlog(DBG_BUMP_LOGS, String.format(
                                 "BUMP (%s): wall rise=%.2f > climbCap=%.2f at %s",
                                 reverse ? "rear" : "front", riseFromGround, climbCap, pos));
+
+                        if (!this.level.isClientSide && !this.isAlive()) this.discard();
                         return true;
                     }
                 }
@@ -596,8 +735,18 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 || name.contains("grass_block") || name.contains("gravel");
     }
 
-    /** Initiates recoil motion, cancels movement, plays thunk. */
+    /** Initiates recoil motion, cancels movement, plays thunk (single/cooldowned sound). */
     private void triggerRecoil(double yawRad, boolean reverseHit) {
+        // 🎥 (Camera lurch left intact; harmless if it does nothing on your client)
+        if (this.level.isClientSide) {
+            double impactSpeedBps = Math.abs(currentSpeed * 20.0);
+            if (impactSpeedBps > 2.0) {
+                lurchStrength = (float)Math.min(impactSpeedBps / 10.0, 0.5f);
+                lurchDuration = (int)Math.min(30 + (impactSpeedBps * 4.0), 30);
+                lurchTicks = lurchDuration;
+            }
+        }
+
         if (recoilTicks > 0 || recoilCooldown > 0) return;
 
         double dirSign = reverseHit ? -1.0 : 1.0;
@@ -607,11 +756,16 @@ public class CardemoEntity extends Mob implements IAnimatable {
         this.currentSpeed = 0.0;
         setDeltaMovement(new Vec3(0, getDeltaMovement().y, 0));
 
-        if (!this.level.isClientSide) {
+        // 🔊 Single anvil sound with short cooldown to prevent overlaps
+        if (!this.level.isClientSide && recentBumpSoundTicks == 0) {
             this.level.playSound(null, this.blockPosition(),
                     SoundEvents.ANVIL_PLACE, SoundSource.BLOCKS,
                     BUMP_VOL, BUMP_PITCH);
+            recentBumpSoundTicks = 5; // ~0.25s at 20 TPS
         }
+
+        // Handle death in case the bump itself is lethal
+        if (!this.level.isClientSide && !this.isAlive()) this.discard();
     }
 
     /** Applies one step of the recoil using a quadratic ease-out curve. */
@@ -635,11 +789,15 @@ public class CardemoEntity extends Mob implements IAnimatable {
             recoilDirection = Vec3.ZERO;
             recoilProgress = 0.0;
         }
+
+        // Final safety: despawn if dead after recoil finishes
+        if (!this.level.isClientSide && !this.isAlive()) this.discard();
     }
 
 // ==========================================================================
-// END BUMP / RECOIL IMPLEMENTATION
+// END BUMP / RECOIL IMPLEMENTATION — death-safe
 // ==========================================================================
+
 
 
 
@@ -760,6 +918,38 @@ public class CardemoEntity extends Mob implements IAnimatable {
         // Heightmap fallback
         return level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
                 (int) Math.floor(pos.x), (int) Math.floor(pos.z));
+    }
+
+    // ==========================================================================
+    // CAMERA LURCH SYSTEM (forward/back head impulse)
+    // ==========================================================================
+    @OnlyIn(Dist.CLIENT)
+    private void applyCameraLurch(Minecraft mc) {
+        if (mc.player == null || !mc.player.isPassengerOfSameVehicle(this)) return;
+        if (lurchTicks <= 0) return;
+
+        // Normalized time progression (0 → 1)
+        float t = (float)(lurchDuration - lurchTicks) / (float)lurchDuration;
+
+        // Ease curve: quick push forward, then gentle rebound
+        float intensity;
+        if (t < 0.4f) {
+            // Rapid initial pitch forward
+            intensity = (float)(Math.sin(t * Math.PI * 1.2) * lurchStrength);
+            mc.player.turn(0f, intensity * 4.0f);
+        } else {
+            // Recoil recovery
+            float recoverT = (t - 0.4f) / 0.6f; // normalize [0.4..1.0]
+            if (recoverT > 1f) recoverT = 1f;
+            intensity = (float)(Math.cos(recoverT * Math.PI) * lurchStrength * 0.5f);
+            mc.player.turn(0f, -intensity * 2.0f);
+        }
+
+        lurchTicks--;
+        if (lurchTicks <= 0) {
+            lurchStrength = 0f;
+            lurchDuration = 0;
+        }
     }
 
     // ==========================================================================
