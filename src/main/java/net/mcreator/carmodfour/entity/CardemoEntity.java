@@ -265,6 +265,9 @@ public class CardemoEntity extends Mob implements IAnimatable {
     private static int lurchDuration = 0;
 
 
+    // --------------------------------------------------------------------------
+// CLIENT-SIDE HOTBAR OVERLAY (Speed / Drive / HP / Horn / Turn Signals)
+// --------------------------------------------------------------------------
     @OnlyIn(Dist.CLIENT)
     private void updateClientSpeedOverlay() {
         Vec3 now = this.position();
@@ -297,16 +300,37 @@ public class CardemoEntity extends Mob implements IAnimatable {
             else if (ratio > 0.25f) colorCode = "§e"; // Yellow (moderate)
             else colorCode = "§c";                    // Red (critical)
 
-            // --- Horn indicator (NEW) ---
+            // --- Horn indicator ---
             boolean hornDown = net.mcreator.carmodfour.client.DriveStateKeybindHandler.HORN_KEY.isDown();
             String horn = hornDown ? "§cH§r" : "H";
 
+            // --- Turn signal indicators (updated) ---
+            boolean leftActive  = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isLeftSignalOn();
+            boolean rightActive = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isRightSignalOn();
+            boolean leftVisible  = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isLeftSignalVisible();
+            boolean rightVisible = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isRightSignalVisible();
+
+            String leftArrow;
+            if (leftActive) {
+                leftArrow = leftVisible ? "§e<§r" : "";  // blink yellow → vanish fully
+            } else {
+                leftArrow = "<"; // steady white when inactive
+            }
+
+            String rightArrow;
+            if (rightActive) {
+                rightArrow = rightVisible ? "§e>§r" : ""; // blink yellow → vanish fully
+            } else {
+                rightArrow = ">"; // steady white when inactive
+            }
+
             // --- Build final overlay line ---
             String text = String.format(
-                    "%s || | %s | %s | %s |  ||  %.1f b/s  ||  HP : %s%d§r / %d",
-                    horn, p, d, r, speed, colorCode, hpInt, maxInt
+                    "%s || %s || | %s | %s | %s |  ||  %.1f b/s  ||  HP : %s%d§r / %d || %s",
+                    leftArrow, horn, p, d, r, speed, colorCode, hpInt, maxInt, rightArrow
             );
 
+            // --- Display overlay (above hotbar) ---
             mc.gui.setOverlayMessage(net.minecraft.network.chat.Component.literal(text), false);
         }
     }
