@@ -200,4 +200,15 @@ public class DriveStateKeybindHandler {
     public static boolean isRightSignalOn() { return rightSignalOn; }
     public static boolean isBraking() { return braking; }
     public static float getBrakeIntensity() { return brakeIntensity; }
+
+    // -------------------------------------------------------------------------
+    // SIGNAL RESET (called by CardemoEntity on spawn/despawn)
+    // -------------------------------------------------------------------------
+    public static void resetSignalsClient() {
+        leftSignalOn = false;
+        rightSignalOn = false;
+        signalTick = 0;
+        signalVisible = true;
+    }
+
 }

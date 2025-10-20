@@ -1158,6 +1158,29 @@ public class CardemoEntity extends Mob implements IAnimatable {
     }
 
     // ==========================================================================
+    // TURN SIGNAL RESET HANDLING (on spawn / despawn)
+    // ==========================================================================
+    @Override
+    public void onAddedToWorld() {
+        super.onAddedToWorld();
+        resetSignalState();
+    }
+
+    @Override
+    public void remove(RemovalReason reason) {
+        super.remove(reason);
+        resetSignalState();
+    }
+
+    /** Resets all client + server turn signal flags when spawned/despawned */
+    private void resetSignalState() {
+        if (level.isClientSide) {
+            // Reset the client-visible indicators
+            net.mcreator.carmodfour.client.DriveStateKeybindHandler.resetSignalsClient();
+        }
+    }
+
+    // ==========================================================================
     // MATH UTILS
     // ==========================================================================
 
