@@ -405,11 +405,12 @@ public class CardemoEntity extends Mob implements IAnimatable {
             double y = getGroundY(p);
             double rise = y - lastY;
 
-            if (rise <= 0) { // ignore descents or flat
-                lastY = y;
-                continue;
-            }
-            if (rise < tinyNoise) { // ignore very small jiggle
+            if (rise <= 0) { lastY = y; continue; }
+            if (rise < tinyNoise) { lastY = y; continue; }
+
+            // ⛰️ Skip bump if stair/slab detected directly at this point
+            BlockPos testPos = new BlockPos(p.x, Math.floor(y - 0.5), p.z);
+            if (isClimbableBlock(testPos)) {
                 lastY = y;
                 continue;
             }
@@ -455,6 +456,9 @@ public class CardemoEntity extends Mob implements IAnimatable {
                             (state.getMaterial().isSolid() || !state.getCollisionShape(level, pos).isEmpty());
                     if (!solid) continue;
 
+                    // Skip bump if the struck block is explicitly climbable
+                    if (isClimbableBlock(pos)) continue;
+
                     // Ascents only: compare the *hit location Y* vs our local ground
                     double hitY = hit.getLocation().y;
                     double riseFromGround = hitY - hereY;
@@ -470,6 +474,29 @@ public class CardemoEntity extends Mob implements IAnimatable {
         }
 
         return false;
+    }
+
+    /**
+     * Returns true if the block at this position is a climbable shape for vehicles —
+     * stairs, slabs, or gentle slope surfaces.
+     */
+    private boolean isClimbableBlock(BlockPos pos) {
+        if (level == null) return false;
+        var state = level.getBlockState(pos);
+        if (state.isAir()) return false;
+
+        var block = state.getBlock();
+        var key = net.minecraftforge.registries.ForgeRegistries.BLOCKS.getKey(block);
+        if (key == null) return false;
+
+        String name = key.getPath(); // e.g. "oak_stairs", "stone_slab"
+
+        return name.contains("stairs")
+                || name.contains("slab")
+                || name.contains("path")
+                || name.contains("carpet")
+                || name.contains("grass_block")
+                || name.contains("gravel");
     }
 
     /** Initiates recoil motion, cancels forward movement, plays thunk. */
@@ -524,7 +551,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
 // ==========================================================================
 // END BUMP / RECOIL IMPLEMENTATION
 // ==========================================================================
-
 
     // ==========================================================================
     // TILT CALCULATION (PITCH + ROLL COMBINED)
