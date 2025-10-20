@@ -85,11 +85,17 @@ public class DriveStateKeybindHandler {
     // -------------------------------------------------------------------------
     private static boolean leftSignalOn = false;
     private static boolean rightSignalOn = false;
-    private static int signalTick = 0;           // tick counter for blink cadence
-    private static boolean signalVisible = true; // current blink phase
+    private static int signalTick = 0;
+    private static boolean signalVisible = true;
 
     // -------------------------------------------------------------------------
-    // INPUT HANDLER — drive state cycling + lever sounds + signals
+    // BRAKE LIGHT INTENSITY (client-only, smooth fade)
+    // -------------------------------------------------------------------------
+    private static boolean braking = false;
+    private static float brakeIntensity = 0.0f; // 0 = off, 1 = full glow
+
+    // -------------------------------------------------------------------------
+    // INPUT HANDLER — drive state cycling + lever sounds + signals + brakes
     // -------------------------------------------------------------------------
     @SubscribeEvent
     public static void onKeyInput(InputEvent.Key event) {
@@ -98,7 +104,7 @@ public class DriveStateKeybindHandler {
         if (player == null || mc.level == null) return;
 
         // ---------------------------------------------------------------------
-        // Legacy O-key cycle (P -> D -> R -> P) with neutral lever click
+        // Legacy O-key cycle (P -> D -> R -> P)
         // ---------------------------------------------------------------------
         if (CYCLE_DRIVE_KEY.consumeClick()) {
             if (player.getVehicle() instanceof CardemoEntity car) {
@@ -119,17 +125,12 @@ public class DriveStateKeybindHandler {
                         break;
                 }
 
-                CarmodfourMod.LOGGER.info("Client pressed O while riding car ID {}. Cycling from {} to {}",
-                        car.getId(), current.name(), next.name());
-
-                // Neutral lever sound (mono)
                 player.level.playLocalSound(
                         car.getX(), car.getY(), car.getZ(),
                         SoundEvents.LEVER_CLICK, SoundSource.PLAYERS,
                         0.8f, 1.0f, false
                 );
 
-                // Send drive state change to server
                 CarmodfourMod.PACKET_HANDLER.sendToServer(
                         new DriveStateChangePacket(car.getId(), next.name())
                 );
@@ -140,33 +141,28 @@ public class DriveStateKeybindHandler {
 
         // ---------------------------------------------------------------------
         // Turn signal toggles (client-only visual/audio)
-        // Left toggles left; Right toggles right; they cancel each other
         // ---------------------------------------------------------------------
         if (LEFT_SIGNAL_KEY.consumeClick()) {
             leftSignalOn = !leftSignalOn;
-            if (leftSignalOn) rightSignalOn = false; // cancel opposite
+            if (leftSignalOn) rightSignalOn = false;
             signalTick = 0;
             signalVisible = true;
-
-            // Play lever click (higher pitch ON, lower pitch OFF)
             player.playSound(SoundEvents.LEVER_CLICK, 0.5f, leftSignalOn ? 1.0f : 0.85f);
         }
 
         if (RIGHT_SIGNAL_KEY.consumeClick()) {
             rightSignalOn = !rightSignalOn;
-            if (rightSignalOn) leftSignalOn = false; // cancel opposite
+            if (rightSignalOn) leftSignalOn = false;
             signalTick = 0;
             signalVisible = true;
-
             player.playSound(SoundEvents.LEVER_CLICK, 0.5f, rightSignalOn ? 1.0f : 0.85f);
         }
 
         // ---------------------------------------------------------------------
-        // Up/Down arrows imitate a gated shifter with lever "up" / "down" clicks
+        // Up/Down arrows imitate a gated shifter with lever sounds
         // ---------------------------------------------------------------------
         if (DRIVE_UP_KEY.consumeClick()) {
             if (player.getVehicle() instanceof CardemoEntity car) {
-                // Lever "up" feel (higher pitch)
                 player.level.playLocalSound(
                         car.getX(), car.getY(), car.getZ(),
                         SoundEvents.LEVER_CLICK, SoundSource.PLAYERS,
@@ -193,14 +189,11 @@ public class DriveStateKeybindHandler {
                 CarmodfourMod.PACKET_HANDLER.sendToServer(
                         new DriveStateChangePacket(car.getId(), next.name())
                 );
-            } else {
-                player.sendSystemMessage(Component.literal("§c[Client] You are not in a car."));
             }
         }
 
         if (DRIVE_DOWN_KEY.consumeClick()) {
             if (player.getVehicle() instanceof CardemoEntity car) {
-                // Lever "down" feel (lower pitch)
                 player.level.playLocalSound(
                         car.getX(), car.getY(), car.getZ(),
                         SoundEvents.LEVER_CLICK, SoundSource.PLAYERS,
@@ -227,14 +220,19 @@ public class DriveStateKeybindHandler {
                 CarmodfourMod.PACKET_HANDLER.sendToServer(
                         new DriveStateChangePacket(car.getId(), next.name())
                 );
-            } else {
-                player.sendSystemMessage(Component.literal("§c[Client] You are not in a car."));
             }
+        }
+
+        // ---------------------------------------------------------------------
+        // Brake key detection (S key)
+        // ---------------------------------------------------------------------
+        if (event.getKey() == GLFW.GLFW_KEY_S) {
+            braking = (event.getAction() != GLFW.GLFW_RELEASE);
         }
     }
 
     // -------------------------------------------------------------------------
-    // CLIENT TICK — horn press sound + signal blink cadence
+    // CLIENT TICK — horn press sound + signal blink cadence + brake fade
     // -------------------------------------------------------------------------
     @SubscribeEvent
     public static void onClientTick(TickEvent.ClientTickEvent event) {
@@ -243,7 +241,6 @@ public class DriveStateKeybindHandler {
         Minecraft mc = Minecraft.getInstance();
         LocalPlayer player = mc.player;
 
-        // ✅ Skip everything when in menus, world not loaded, or paused
         if (player == null || mc.level == null || mc.isPaused() || mc.screen != null) return;
 
         // --- Horn one-shot when key goes down ---
@@ -253,7 +250,7 @@ public class DriveStateKeybindHandler {
             if (isDown && !prevHornDown) {
                 car.level.playLocalSound(
                         car.getX(), car.getY(), car.getZ(),
-                        SoundEvents.PILLAGER_AMBIENT, // placeholder horn
+                        SoundEvents.PILLAGER_AMBIENT,
                         SoundSource.PLAYERS,
                         1.0f, 1.0f, false
                 );
@@ -269,20 +266,25 @@ public class DriveStateKeybindHandler {
             if (signalTick >= 10) {
                 signalTick = 0;
                 signalVisible = !signalVisible;
-
-                // ✅ Play sound only when player is actively in the world (not menus)
                 if (!mc.isPaused() && mc.screen == null && mc.level != null) {
                     float pitch = signalVisible ? 1.0f : 0.8f;
                     player.playSound(SoundEvents.UI_BUTTON_CLICK, 0.35f, pitch);
                 }
             }
         } else {
-            signalVisible = true; // Reset visibility
+            signalVisible = true;
         }
+
+        // --- Smooth brake light fade ---
+        float target = braking ? 1.0f : 0.0f;
+        float rate = braking ? 0.25f : 0.15f;
+        brakeIntensity += (target - brakeIntensity) * rate;
+        if (brakeIntensity < 0.001f) brakeIntensity = 0.0f;
+        if (brakeIntensity > 0.999f) brakeIntensity = 1.0f;
     }
 
     // -------------------------------------------------------------------------
-    // ACCESSORS (used by CardemoEntity overlay)
+    // ACCESSORS
     // -------------------------------------------------------------------------
     public static boolean isLeftSignalVisible() {
         return leftSignalOn && signalVisible;
@@ -298,5 +300,13 @@ public class DriveStateKeybindHandler {
 
     public static boolean isRightSignalOn() {
         return rightSignalOn;
+    }
+
+    public static boolean isBraking() {
+        return braking;
+    }
+
+    public static float getBrakeIntensity() {
+        return brakeIntensity;
     }
 }

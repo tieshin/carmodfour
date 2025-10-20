@@ -32,7 +32,7 @@ import java.util.ArrayDeque;
  *  - Terrain tilt and wall roll
  *  - Anti-intersection tilt (front/back/side)
  *  - Spring-damped lift and recoil smoothing
- *  - Emissive blinker overlays (left/right) bound to model UV
+ *  - Emissive overlays (blinkers + brake lights) bound to model UV
  */
 public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
 
@@ -43,6 +43,8 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
             new ResourceLocation("carmodfour:textures/entities/cardemo_l_blinker_overlay.png");
     private static final ResourceLocation RIGHT_SIGNAL_EMISSIVE =
             new ResourceLocation("carmodfour:textures/entities/cardemo_r_blinker_overlay.png");
+    private static final ResourceLocation BRAKE_LIGHT_EMISSIVE =
+            new ResourceLocation("carmodfour:textures/entities/cardemo_brake_light_overlay.png");
 
     // ===============================================================
     // STATE VARIABLES
@@ -77,12 +79,15 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
     private static final float  RECOIL_SHAKE_INTENSITY = 6.5f;
     private static final float  TERRAIN_SHAKE_GAIN = 0.8f;
 
+    // ===============================================================
+    // CONSTRUCTOR
+    // ===============================================================
     public CardemoRenderer(EntityRendererProvider.Context renderManager) {
         super(renderManager, new CardemoModel());
         this.shadowRadius = 1.0f;
 
         // ===========================================================
-        // EMISSIVE BLINKER LAYER (MODEL-SPACE ATTACHED)
+        // EMISSIVE OVERLAY LAYER (BLINKERS + BRAKE FADE)
         // ===========================================================
         this.addLayer(new GeoLayerRenderer<CardemoEntity>(this) {
             @Override
@@ -92,41 +97,48 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
 
                 boolean leftVisible  = DriveStateKeybindHandler.isLeftSignalVisible();
                 boolean rightVisible = DriveStateKeybindHandler.isRightSignalVisible();
-                if (!leftVisible && !rightVisible) return;
+                float brakeIntensity = DriveStateKeybindHandler.getBrakeIntensity();
+
+                if (!leftVisible && !rightVisible && brakeIntensity <= 0.01f)
+                    return;
 
                 GeoModelProvider<CardemoEntity> provider = this.getEntityModel();
                 GeoModel model = provider.getModel(provider.getModelResource(entity));
 
                 if (leftVisible)
-                    renderEmissive(model, stack, bufferIn, entity, LEFT_SIGNAL_EMISSIVE);
+                    renderEmissive(model, stack, bufferIn, entity, LEFT_SIGNAL_EMISSIVE, 1f);
+
                 if (rightVisible)
-                    renderEmissive(model, stack, bufferIn, entity, RIGHT_SIGNAL_EMISSIVE);
+                    renderEmissive(model, stack, bufferIn, entity, RIGHT_SIGNAL_EMISSIVE, 1f);
+
+                if (brakeIntensity > 0.01f)
+                    renderEmissive(model, stack, bufferIn, entity, BRAKE_LIGHT_EMISSIVE, brakeIntensity);
             }
 
             private void renderEmissive(GeoModel model, PoseStack stack, MultiBufferSource bufferIn,
-                                        CardemoEntity entity, ResourceLocation texture) {
+                                        CardemoEntity entity, ResourceLocation texture, float alpha) {
                 RenderType rt = RenderType.entityTranslucentEmissive(texture);
                 VertexConsumer vc = bufferIn.getBuffer(rt);
                 this.getRenderer().render(model, entity, 0, rt, stack, bufferIn, vc,
-                        0xF000F0, OverlayTexture.NO_OVERLAY, 1f, 1f, 1f, 1f);
+                        0xF000F0, OverlayTexture.NO_OVERLAY, 1f, 1f, 1f, alpha);
             }
         });
     }
 
     // ===============================================================
-    // MAIN RENDER METHOD — applies car scale only once
+    // MAIN RENDER METHOD
     // ===============================================================
     @Override
     public void render(CardemoEntity entity, float entityYaw, float partialTicks,
                        PoseStack stack, MultiBufferSource bufferIn, int packedLightIn) {
         stack.pushPose();
-        stack.scale(2.0f, 2.0f, 2.0f); // ✅ scale car visually once
+        stack.scale(2.0f, 2.0f, 2.0f); // consistent car scale
         super.render(entity, entityYaw, partialTicks, stack, bufferIn, packedLightIn);
         stack.popPose();
     }
 
     // ===============================================================
-    // ROTATIONS, TERRAIN TILT, RECOIL, AND LIFT DYNAMICS
+    // ROTATIONS + TERRAIN TILT + SPRING DYNAMICS
     // ===============================================================
     @Override
     protected void applyRotations(CardemoEntity entity, PoseStack stack,
@@ -147,7 +159,7 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
 
         if (entity.level == null) return;
 
-        // --- Speed scaling ---
+        // --- Speed-based tilt scaling ---
         double speed = Math.min(entity.getDeltaMovement().length() * 20.0, 1.0);
         float speedScale = (float) (0.5 + speed * 1.5f);
         float tiltStrength   = BASE_TILT_STRENGTH * speedScale;
@@ -157,7 +169,7 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
         BlockPos basePos = new BlockPos(pos.x, pos.y, pos.z);
         float tiltX = 0f, tiltZ = 0f, lift = 0f;
 
-        // --- Basic wall & floor checks ---
+        // --- Wall proximity tilt ---
         for (int dx = -1; dx <= 1; dx++) {
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dz = -1; dz <= 1; dz++) {
@@ -179,13 +191,15 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
             }
         }
 
-        // --- Rear probing enhancement ---
+        // --- Rear bumper check ---
         double yawRad = Math.toRadians(entity.getYRot());
         Vec3 rearDir = new Vec3(Math.sin(yawRad + Math.PI), 0, -Math.cos(yawRad + Math.PI)).normalize();
-        AABB rearBox = entity.getBoundingBox().move(-rearDir.x * 0.8, 0, -rearDir.z * 0.8).inflate(0.1, 0.2, 0.1);
+        AABB rearBox = entity.getBoundingBox()
+                .move(-rearDir.x * 0.8, 0, -rearDir.z * 0.8)
+                .inflate(0.1, 0.2, 0.1);
+
         int totalHits = 0;
         float totalDepth = 0f;
-
         for (BlockPos bp : BlockPos.betweenClosed(
                 new BlockPos(Math.floor(rearBox.minX), Math.floor(rearBox.minY), Math.floor(rearBox.minZ)),
                 new BlockPos(Math.floor(rearBox.maxX), Math.floor(rearBox.maxY), Math.floor(rearBox.maxZ))
@@ -205,12 +219,15 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
             lift  += avgDepth * offsetStrength * 0.8f;
         }
 
-        // --- Spring-damped smooth updates ---
+        // --- Spring smoothing ---
         addToHistory(tiltXHist, tiltX);
         addToHistory(tiltZHist, tiltZ);
-        addToHistory(liftHist, lift);
+        addToHistory(liftHist,  lift);
 
-        float avgX = average(tiltXHist), avgZ = average(tiltZHist), avgLift = average(liftHist);
+        float avgX = average(tiltXHist);
+        float avgZ = average(tiltZHist);
+        float avgLift = average(liftHist);
+
         tiltVelX += (avgX - smoothTiltX) * SPRING_STIFFNESS;
         tiltVelZ += (avgZ - smoothTiltZ) * SPRING_STIFFNESS;
         liftVel  += (avgLift - smoothLift) * SPRING_STIFFNESS;
@@ -231,7 +248,7 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
     }
 
     // ===============================================================
-    // HELPER METHODS
+    // HELPERS
     // ===============================================================
     @Override
     public RenderType getRenderType(CardemoEntity entity, float partialTicks, PoseStack stack,
