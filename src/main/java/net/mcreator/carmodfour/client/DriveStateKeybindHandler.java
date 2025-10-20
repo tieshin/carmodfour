@@ -2,6 +2,7 @@ package net.mcreator.carmodfour.client;
 
 import net.mcreator.carmodfour.CarmodfourMod;
 import net.mcreator.carmodfour.network.DriveStateChangePacket;
+import net.mcreator.carmodfour.network.BrakeControlPacket;
 import net.mcreator.carmodfour.entity.CardemoEntity;
 
 import net.minecraft.client.KeyMapping;
@@ -27,44 +28,18 @@ public class DriveStateKeybindHandler {
     // KEY MAPPINGS
     // -------------------------------------------------------------------------
     public static final KeyMapping CYCLE_DRIVE_KEY = new KeyMapping(
-            "key.carmodfour.cycle_drive_state",
-            GLFW.GLFW_KEY_O,
-            "key.categories.carmodfour"
-    );
-
+            "key.carmodfour.cycle_drive_state", GLFW.GLFW_KEY_O, "key.categories.carmodfour");
     public static final KeyMapping HORN_KEY = new KeyMapping(
-            "key.carmodfour.vehicle_horn",
-            GLFW.GLFW_KEY_H,
-            "key.categories.carmodfour"
-    );
-
+            "key.carmodfour.vehicle_horn", GLFW.GLFW_KEY_H, "key.categories.carmodfour");
     public static final KeyMapping DRIVE_UP_KEY = new KeyMapping(
-            "key.carmodfour.drive_up",
-            GLFW.GLFW_KEY_UP,
-            "key.categories.carmodfour"
-    );
-
+            "key.carmodfour.drive_up", GLFW.GLFW_KEY_UP, "key.categories.carmodfour");
     public static final KeyMapping DRIVE_DOWN_KEY = new KeyMapping(
-            "key.carmodfour.drive_down",
-            GLFW.GLFW_KEY_DOWN,
-            "key.categories.carmodfour"
-    );
-
+            "key.carmodfour.drive_down", GLFW.GLFW_KEY_DOWN, "key.categories.carmodfour");
     public static final KeyMapping LEFT_SIGNAL_KEY = new KeyMapping(
-            "key.carmodfour.signal_left",
-            GLFW.GLFW_KEY_LEFT,
-            "key.categories.carmodfour"
-    );
-
+            "key.carmodfour.signal_left", GLFW.GLFW_KEY_LEFT, "key.categories.carmodfour");
     public static final KeyMapping RIGHT_SIGNAL_KEY = new KeyMapping(
-            "key.carmodfour.signal_right",
-            GLFW.GLFW_KEY_RIGHT,
-            "key.categories.carmodfour"
-    );
+            "key.carmodfour.signal_right", GLFW.GLFW_KEY_RIGHT, "key.categories.carmodfour");
 
-    // -------------------------------------------------------------------------
-    // REGISTER
-    // -------------------------------------------------------------------------
     @SubscribeEvent
     public static void registerKeys(RegisterKeyMappingsEvent event) {
         event.register(CYCLE_DRIVE_KEY);
@@ -80,22 +55,16 @@ public class DriveStateKeybindHandler {
     // -------------------------------------------------------------------------
     private static boolean prevHornDown = false;
 
-    // -------------------------------------------------------------------------
-    // TURN SIGNAL STATE (client-only)
-    // -------------------------------------------------------------------------
     private static boolean leftSignalOn = false;
     private static boolean rightSignalOn = false;
     private static int signalTick = 0;
     private static boolean signalVisible = true;
 
-    // -------------------------------------------------------------------------
-    // BRAKE LIGHT INTENSITY (client-only, smooth fade)
-    // -------------------------------------------------------------------------
     private static boolean braking = false;
-    private static float brakeIntensity = 0.0f; // 0 = off, 1 = full glow
+    private static float brakeIntensity = 0.0f;
 
     // -------------------------------------------------------------------------
-    // INPUT HANDLER — drive state cycling + lever sounds + signals + brakes
+    // INPUT HANDLER — shifts, signals, brakes
     // -------------------------------------------------------------------------
     @SubscribeEvent
     public static void onKeyInput(InputEvent.Key event) {
@@ -103,136 +72,78 @@ public class DriveStateKeybindHandler {
         LocalPlayer player = mc.player;
         if (player == null || mc.level == null) return;
 
-        // ---------------------------------------------------------------------
-        // Legacy O-key cycle (P -> D -> R -> P)
-        // ---------------------------------------------------------------------
+        CardemoEntity car = (player.getVehicle() instanceof CardemoEntity c) ? c : null;
+        boolean isDriving = car != null && car.isEngineOn();
+
+        // --- Legacy O cycle ---
         if (CYCLE_DRIVE_KEY.consumeClick()) {
-            if (player.getVehicle() instanceof CardemoEntity car) {
-                CardemoEntity.DriveState current = car.getDriveState();
-                CardemoEntity.DriveState next = CardemoEntity.DriveState.PARK;
-
-                switch (current) {
-                    case PARK:
-                        next = CardemoEntity.DriveState.DRIVE;
-                        break;
-                    case DRIVE:
-                        next = CardemoEntity.DriveState.REVERSE;
-                        break;
-                    case REVERSE:
-                        next = CardemoEntity.DriveState.PARK;
-                        break;
-                    default:
-                        break;
-                }
-
-                player.level.playLocalSound(
-                        car.getX(), car.getY(), car.getZ(),
-                        SoundEvents.LEVER_CLICK, SoundSource.PLAYERS,
-                        0.8f, 1.0f, false
-                );
-
-                CarmodfourMod.PACKET_HANDLER.sendToServer(
-                        new DriveStateChangePacket(car.getId(), next.name())
-                );
+            if (car != null) {
+                CardemoEntity.DriveState next = switch (car.getDriveState()) {
+                    case PARK -> CardemoEntity.DriveState.DRIVE;
+                    case DRIVE -> CardemoEntity.DriveState.REVERSE;
+                    case REVERSE -> CardemoEntity.DriveState.PARK;
+                };
+                player.level.playLocalSound(car.getX(), car.getY(), car.getZ(),
+                        SoundEvents.LEVER_CLICK, SoundSource.PLAYERS, 0.8f, 1.0f, false);
+                CarmodfourMod.PACKET_HANDLER.sendToServer(new DriveStateChangePacket(car.getId(), next.name()));
             } else {
                 player.sendSystemMessage(Component.literal("§c[Client] You are not in a car."));
             }
         }
 
-        // ---------------------------------------------------------------------
-        // Turn signal toggles (client-only visual/audio)
-        // ---------------------------------------------------------------------
-        if (LEFT_SIGNAL_KEY.consumeClick()) {
-            leftSignalOn = !leftSignalOn;
-            if (leftSignalOn) rightSignalOn = false;
-            signalTick = 0;
-            signalVisible = true;
-            player.playSound(SoundEvents.LEVER_CLICK, 0.5f, leftSignalOn ? 1.0f : 0.85f);
-        }
-
-        if (RIGHT_SIGNAL_KEY.consumeClick()) {
-            rightSignalOn = !rightSignalOn;
-            if (rightSignalOn) leftSignalOn = false;
-            signalTick = 0;
-            signalVisible = true;
-            player.playSound(SoundEvents.LEVER_CLICK, 0.5f, rightSignalOn ? 1.0f : 0.85f);
-        }
-
-        // ---------------------------------------------------------------------
-        // Up/Down arrows imitate a gated shifter with lever sounds
-        // ---------------------------------------------------------------------
-        if (DRIVE_UP_KEY.consumeClick()) {
-            if (player.getVehicle() instanceof CardemoEntity car) {
-                player.level.playLocalSound(
-                        car.getX(), car.getY(), car.getZ(),
-                        SoundEvents.LEVER_CLICK, SoundSource.PLAYERS,
-                        0.9f, 1.2f, false
-                );
-
-                CardemoEntity.DriveState current = car.getDriveState();
-                CardemoEntity.DriveState next = current;
-
-                switch (current) {
-                    case PARK:
-                        next = CardemoEntity.DriveState.DRIVE;
-                        break;
-                    case DRIVE:
-                        next = CardemoEntity.DriveState.REVERSE;
-                        break;
-                    case REVERSE:
-                        next = CardemoEntity.DriveState.REVERSE;
-                        break;
-                    default:
-                        break;
-                }
-
-                CarmodfourMod.PACKET_HANDLER.sendToServer(
-                        new DriveStateChangePacket(car.getId(), next.name())
-                );
+        // --- Turn signal toggles (only when in car & engine on) ---
+        if (isDriving) {
+            if (LEFT_SIGNAL_KEY.consumeClick()) {
+                leftSignalOn = !leftSignalOn;
+                if (leftSignalOn) rightSignalOn = false;
+                signalTick = 0;
+                signalVisible = true;
+                player.playSound(SoundEvents.LEVER_CLICK, 0.5f, leftSignalOn ? 1.0f : 0.85f);
+            }
+            if (RIGHT_SIGNAL_KEY.consumeClick()) {
+                rightSignalOn = !rightSignalOn;
+                if (rightSignalOn) leftSignalOn = false;
+                signalTick = 0;
+                signalVisible = true;
+                player.playSound(SoundEvents.LEVER_CLICK, 0.5f, rightSignalOn ? 1.0f : 0.85f);
             }
         }
 
-        if (DRIVE_DOWN_KEY.consumeClick()) {
-            if (player.getVehicle() instanceof CardemoEntity car) {
-                player.level.playLocalSound(
-                        car.getX(), car.getY(), car.getZ(),
-                        SoundEvents.LEVER_CLICK, SoundSource.PLAYERS,
-                        0.9f, 0.8f, false
-                );
-
-                CardemoEntity.DriveState current = car.getDriveState();
-                CardemoEntity.DriveState next = current;
-
-                switch (current) {
-                    case REVERSE:
-                        next = CardemoEntity.DriveState.DRIVE;
-                        break;
-                    case DRIVE:
-                        next = CardemoEntity.DriveState.PARK;
-                        break;
-                    case PARK:
-                        next = CardemoEntity.DriveState.PARK;
-                        break;
-                    default:
-                        break;
-                }
-
-                CarmodfourMod.PACKET_HANDLER.sendToServer(
-                        new DriveStateChangePacket(car.getId(), next.name())
-                );
+        // --- Shifter up/down (only when in car & engine on) ---
+        if (isDriving) {
+            if (DRIVE_UP_KEY.consumeClick()) {
+                player.level.playLocalSound(car.getX(), car.getY(), car.getZ(),
+                        SoundEvents.LEVER_CLICK, SoundSource.PLAYERS, 0.9f, 1.2f, false);
+                CardemoEntity.DriveState next = switch (car.getDriveState()) {
+                    case PARK -> CardemoEntity.DriveState.DRIVE;
+                    case DRIVE, REVERSE -> CardemoEntity.DriveState.REVERSE;
+                };
+                CarmodfourMod.PACKET_HANDLER.sendToServer(new DriveStateChangePacket(car.getId(), next.name()));
+            }
+            if (DRIVE_DOWN_KEY.consumeClick()) {
+                player.level.playLocalSound(car.getX(), car.getY(), car.getZ(),
+                        SoundEvents.LEVER_CLICK, SoundSource.PLAYERS, 0.9f, 0.8f, false);
+                CardemoEntity.DriveState next = switch (car.getDriveState()) {
+                    case REVERSE -> CardemoEntity.DriveState.DRIVE;
+                    case DRIVE, PARK -> CardemoEntity.DriveState.PARK;
+                };
+                CarmodfourMod.PACKET_HANDLER.sendToServer(new DriveStateChangePacket(car.getId(), next.name()));
             }
         }
 
-        // ---------------------------------------------------------------------
-        // Brake key detection (S key)
-        // ---------------------------------------------------------------------
+        // --- Brake key: send to server on PRESS and RELEASE ---
         if (event.getKey() == GLFW.GLFW_KEY_S) {
-            braking = (event.getAction() != GLFW.GLFW_RELEASE);
+            boolean nowBraking = (event.getAction() != GLFW.GLFW_RELEASE);
+            braking = nowBraking; // local visual
+            if (isDriving) {
+                // authoritative change on server; also cancels accelerating there
+                CarmodfourMod.PACKET_HANDLER.sendToServer(new BrakeControlPacket(car.getId(), nowBraking));
+            }
         }
     }
 
     // -------------------------------------------------------------------------
-    // CLIENT TICK — horn press sound + signal blink cadence + brake fade
+    // CLIENT TICK — horn, blinkers (visual persists), brake glow
     // -------------------------------------------------------------------------
     @SubscribeEvent
     public static void onClientTick(TickEvent.ClientTickEvent event) {
@@ -240,33 +151,30 @@ public class DriveStateKeybindHandler {
 
         Minecraft mc = Minecraft.getInstance();
         LocalPlayer player = mc.player;
+        if (player == null || mc.level == null || mc.isPaused()) return;
 
-        if (player == null || mc.level == null || mc.isPaused() || mc.screen != null) return;
-
-        // --- Horn one-shot when key goes down ---
         CardemoEntity car = (player.getVehicle() instanceof CardemoEntity c) ? c : null;
-        if (car != null) {
-            boolean isDown = HORN_KEY.isDown();
-            if (isDown && !prevHornDown) {
-                car.level.playLocalSound(
-                        car.getX(), car.getY(), car.getZ(),
-                        SoundEvents.PILLAGER_AMBIENT,
-                        SoundSource.PLAYERS,
-                        1.0f, 1.0f, false
-                );
+        boolean isDriving = car != null && car.isEngineOn();
+
+        // Horn (only when in car)
+        if (isDriving) {
+            boolean down = HORN_KEY.isDown();
+            if (down && !prevHornDown) {
+                car.level.playLocalSound(car.getX(), car.getY(), car.getZ(),
+                        SoundEvents.PILLAGER_AMBIENT, SoundSource.PLAYERS, 1.0f, 1.0f, false);
             }
-            prevHornDown = isDown;
+            prevHornDown = down;
         } else {
             prevHornDown = false;
         }
 
-        // --- Turn Signal Flicker (client-only) ---
+        // Blinkers: keep flicker even after exit; but sound only while inside
         if (leftSignalOn || rightSignalOn) {
             signalTick++;
             if (signalTick >= 10) {
                 signalTick = 0;
                 signalVisible = !signalVisible;
-                if (!mc.isPaused() && mc.screen == null && mc.level != null) {
+                if (isDriving) {
                     float pitch = signalVisible ? 1.0f : 0.8f;
                     player.playSound(SoundEvents.UI_BUTTON_CLICK, 0.35f, pitch);
                 }
@@ -275,8 +183,8 @@ public class DriveStateKeybindHandler {
             signalVisible = true;
         }
 
-        // --- Smooth brake light fade ---
-        float target = braking ? 1.0f : 0.0f;
+        // Brake light smooth fade (visual only)
+        float target = (isDriving && braking) ? 1.0f : 0.0f;
         float rate = braking ? 0.25f : 0.15f;
         brakeIntensity += (target - brakeIntensity) * rate;
         if (brakeIntensity < 0.001f) brakeIntensity = 0.0f;
@@ -284,29 +192,12 @@ public class DriveStateKeybindHandler {
     }
 
     // -------------------------------------------------------------------------
-    // ACCESSORS
+    // ACCESSORS (used by renderer / overlay)
     // -------------------------------------------------------------------------
-    public static boolean isLeftSignalVisible() {
-        return leftSignalOn && signalVisible;
-    }
-
-    public static boolean isRightSignalVisible() {
-        return rightSignalOn && signalVisible;
-    }
-
-    public static boolean isLeftSignalOn() {
-        return leftSignalOn;
-    }
-
-    public static boolean isRightSignalOn() {
-        return rightSignalOn;
-    }
-
-    public static boolean isBraking() {
-        return braking;
-    }
-
-    public static float getBrakeIntensity() {
-        return brakeIntensity;
-    }
+    public static boolean isLeftSignalVisible() { return leftSignalOn && signalVisible; }
+    public static boolean isRightSignalVisible() { return rightSignalOn && signalVisible; }
+    public static boolean isLeftSignalOn() { return leftSignalOn; }
+    public static boolean isRightSignalOn() { return rightSignalOn; }
+    public static boolean isBraking() { return braking; }
+    public static float getBrakeIntensity() { return brakeIntensity; }
 }
