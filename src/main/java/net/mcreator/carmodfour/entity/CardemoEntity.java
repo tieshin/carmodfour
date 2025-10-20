@@ -346,9 +346,28 @@ public class CardemoEntity extends Mob implements IAnimatable {
         // ---------------------------------------------------------------------
         // 🧩 BUMP DETECTION (added)
         // ---------------------------------------------------------------------
-        if (!reverse && currentSpeed > 0.05 && recoilCooldown == 0) {
-            if (isBlockedAheadOrTooSteep(yawRad)) {
-                triggerRecoil(yawRad);
+        if (currentSpeed > 0.05 && recoilCooldown == 0) {
+            if (!reverse && isBlockedAheadOrTooSteep(yawRad)) {
+                triggerRecoil(yawRad, false); // front hit
+                applyTerrainAndProximityTilt(yawRad);
+                return;
+            }
+            if (reverse && isBlockedBehindOrTooSteep(yawRad)) {
+                triggerRecoil(yawRad, true);  // rear hit
+                applyTerrainAndProximityTilt(yawRad);
+                return;
+            }
+        }  // Preemptive bump clamp — stop forward motion if wall detected right before move
+        if (recoilCooldown == 0 && currentSpeed > 0.01) {
+            if (!reverse && isBlockedAheadOrTooSteep(yawRad)) {
+                currentSpeed = 0;
+                triggerRecoil(yawRad, false);
+                applyTerrainAndProximityTilt(yawRad);
+                return;
+            }
+            if (reverse && isBlockedBehindOrTooSteep(yawRad)) {
+                currentSpeed = 0;
+                triggerRecoil(yawRad, true);
                 applyTerrainAndProximityTilt(yawRad);
                 return;
             }
@@ -369,63 +388,87 @@ public class CardemoEntity extends Mob implements IAnimatable {
     }
 
 // ==========================================================================
-// BUMP / RECOIL IMPLEMENTATION — simple, robust ascent-only detection
+// BUMP / RECOIL IMPLEMENTATION — front and rear adaptive detection
 // ==========================================================================
 
     /**
-     * Detects a true, unclimbable rise (or solid wall) directly ahead.
+     * Detects a true, unclimbable rise (or solid wall) directly ahead or behind.
+     * Front detection uses forward vector; rear detection uses inverted vector.
      *
-     * Strategy (speed-invariant, ascent-only):
-     *  1) Ground step check at 0.5, 1.0, 1.5, 2.0 blocks ahead:
-     *     - If any *upward* step exceeds maxUpStep (with a small margin), bump.
-     *  2) Forward rays (center and ±0.35 wide) at two heights (0.6, 1.2) for 2.0 blocks:
-     *     - If a ray hits a solid block whose *hit Y* is above (groundY + climbCap), bump.
-     *  Notes:
-     *    - Descents are ignored entirely.
-     *    - Tiny rises (< 0.12) are ignored to prevent noise.
-     *    - Fixed lookahead (2.0) avoids high-speed temporal artifacts while remaining predictable.
+     * Notes:
+     *  - Explicitly ignores stairs/slabs using isClimbableBlock().
+     *  - Each side has its own detection pass but shares recoil cooldown.
+     *  - Rear bump detection reaches farther than front.
      */
     private boolean isBlockedAheadOrTooSteep(double yawRad) {
+        return detectBumpDirection(yawRad, false); // false = forward
+    }
+
+    private boolean isBlockedBehindOrTooSteep(double yawRad) {
+        return detectBumpDirection(yawRad, true);  // true = backward
+    }
+
+    /**
+     * Generic directional bump detection (forward or backward),
+     * with adaptive range and offset for large vehicle body.
+     */
+    private boolean detectBumpDirection(double yawRad, boolean reverse) {
         if (recoilTicks > 0) return false;
 
-        final double lookahead = 2.0;                      // fixed, predictable range
-        final double tinyNoise = 0.12;                     // ignore micro rises
-        final double climbCap  = this.maxUpStep + 0.05;    // what we can climb per block
+        // ======================================================================
+        // Dynamic lookahead:
+        //  - Front reverted to original 2.0 m range
+        //  - Rear remains longer for bumper overhang
+        //  - Slight adaptive component for slow-speed precision
+        // ======================================================================
+        double speed = Math.abs(currentSpeed);
+        double baseLookahead = reverse ? 2.6 : 1.5;          // reverted front, extended rear
+        double adaptive = 0.4 + Math.min(1.0, speed * 8.0);  // 0.4–1.4 adaptive margin
+        final double lookahead = baseLookahead + adaptive;   // ≈2.4–3.4 rear, ≈2.0–2.8 front
+        final double tinyNoise = 0.12;
+        final double climbCap  = this.maxUpStep + 0.05;
 
+        // Direction vectors
         Vec3 forward = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad)).normalize();
+        if (reverse) forward = forward.scale(-1);
+
         Vec3 here    = this.position();
         double hereY = getGroundY(here);
 
+        // ======================================================================
+        // Apply directional offset — treat bumper edges, not entity center
+        // ======================================================================
+        // Front: start 0.6 m ahead; Rear: 1.0 m back for visual overhang
+        Vec3 originOffset = forward.scale(reverse ? -1.0 : 0.4);
+        Vec3 originPos = here.add(originOffset);
+
         // ----------------------------------------------------------------------
-        // (A) Step check on the ground line directly ahead (ascent-only)
+        // (A) Step check on the ground line directly ahead or behind
         // ----------------------------------------------------------------------
         double lastY = hereY;
         for (double dist = 0.5; dist <= lookahead + 1e-6; dist += 0.5) {
-            Vec3 p = here.add(forward.scale(dist));
+            Vec3 p = originPos.add(forward.scale(dist));
             double y = getGroundY(p);
             double rise = y - lastY;
 
             if (rise <= 0) { lastY = y; continue; }
             if (rise < tinyNoise) { lastY = y; continue; }
 
-            // ⛰️ Skip bump if stair/slab detected directly at this point
+            // Skip bump if stair/slab detected directly at this point
             BlockPos testPos = new BlockPos(p.x, Math.floor(y - 0.5), p.z);
-            if (isClimbableBlock(testPos)) {
-                lastY = y;
-                continue;
-            }
+            if (isClimbableBlock(testPos)) { lastY = y; continue; }
 
-            // Abrupt rise (true step) exceeds climb capability → bump
             if (rise > climbCap) {
-                dlog(DBG_BUMP_LOGS, String.format("BUMP: step rise=%.2f > climbCap=%.2f at dist=%.1f",
-                        rise, climbCap, dist));
+                dlog(DBG_BUMP_LOGS, String.format(
+                        "BUMP (%s): step rise=%.2f > climbCap=%.2f at dist=%.1f",
+                        reverse ? "rear" : "front", rise, climbCap, dist));
                 return true;
             }
             lastY = y;
         }
 
         // ----------------------------------------------------------------------
-        // (B) Wall/solid check with simple forward rays at two heights
+        // (B) Wall/solid check with forward rays at two heights
         // ----------------------------------------------------------------------
         final double[] lateral = { 0.0, +0.35, -0.35 };
         final double[] heights = { 0.6, 1.2 };
@@ -433,10 +476,10 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
         for (double h : heights) {
             for (double lat : lateral) {
-                Vec3 origin = new Vec3(this.getX(), hereY, this.getZ())
+                Vec3 origin = originPos
                         .add(right.scale(lat))
                         .add(0.0, h, 0.0);
-                Vec3 end = origin.add(forward.scale(lookahead));
+                Vec3 end = origin.add(forward.scale(lookahead + 0.1)); // small safety margin
 
                 net.minecraft.world.level.ClipContext ctx =
                         new net.minecraft.world.level.ClipContext(
@@ -451,22 +494,19 @@ public class CardemoEntity extends Mob implements IAnimatable {
                     BlockPos pos = bhr.getBlockPos();
                     var state = level.getBlockState(pos);
 
-                    // solid enough to matter?
                     boolean solid = !state.isAir() &&
                             (state.getMaterial().isSolid() || !state.getCollisionShape(level, pos).isEmpty());
                     if (!solid) continue;
 
-                    // Skip bump if the struck block is explicitly climbable
                     if (isClimbableBlock(pos)) continue;
 
-                    // Ascents only: compare the *hit location Y* vs our local ground
                     double hitY = hit.getLocation().y;
                     double riseFromGround = hitY - hereY;
 
                     if (riseFromGround > climbCap) {
                         dlog(DBG_BUMP_LOGS, String.format(
-                                "BUMP: wall/solid ahead (hitY rise=%.2f > climbCap=%.2f) at %s",
-                                riseFromGround, climbCap, pos));
+                                "BUMP (%s): wall ahead (rise=%.2f > climbCap=%.2f) at %s",
+                                reverse ? "rear" : "front", riseFromGround, climbCap, pos));
                         return true;
                     }
                 }
@@ -499,28 +539,23 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 || name.contains("gravel");
     }
 
-    /** Initiates recoil motion, cancels forward movement, plays thunk. */
-    private void triggerRecoil(double yawRad) {
+    /** Initiates recoil motion, cancels movement, plays thunk. */
+    private void triggerRecoil(double yawRad, boolean reverseHit) {
         if (recoilTicks > 0 || recoilCooldown > 0) return;
 
-        this.recoilDirection = new Vec3(Math.sin(yawRad), 0, -Math.cos(yawRad)).normalize();
+        // Reverse hit pushes forward, front hit pushes backward
+        double directionSign = reverseHit ? -1.0 : 1.0;
+        this.recoilDirection = new Vec3(Math.sin(yawRad) * directionSign, 0, -Math.cos(yawRad) * directionSign).normalize();
+
         this.recoilTicks = RECOIL_DURATION;
         this.recoilProgress = 0.0;
-
-        // Stop forward motion immediately
         this.currentSpeed = 0.0;
         setDeltaMovement(new Vec3(0, getDeltaMovement().y, 0));
 
-        // Metallic thunk (server-side broadcast)
         if (!this.level.isClientSide) {
-            this.level.playSound(
-                    null,
-                    this.blockPosition(),
-                    SoundEvents.ANVIL_PLACE,
-                    SoundSource.BLOCKS,
-                    BUMP_VOL,
-                    BUMP_PITCH
-            );
+            this.level.playSound(null, this.blockPosition(),
+                    SoundEvents.ANVIL_PLACE, SoundSource.BLOCKS,
+                    BUMP_VOL, BUMP_PITCH);
         }
     }
 
@@ -532,7 +567,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
         double tNext = (RECOIL_DURATION - recoilTicks + 1) / (double) RECOIL_DURATION;
         recoilProgress = tNext;
 
-        // Ease-out: f(t) = 1 - (1 - t)^2
         double easePrev = 1.0 - Math.pow(1.0 - tPrev, 2.0);
         double easeNext = 1.0 - Math.pow(1.0 - tNext, 2.0);
         double distThisTick = (easeNext - easePrev) * RECOIL_TOTAL_DIST;
