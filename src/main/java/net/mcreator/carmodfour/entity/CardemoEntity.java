@@ -172,8 +172,8 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
 
     // ==========================================================================
-    // HEADLIGHT BEAM LIGHT BLOCK HANDLER (MOVING BEAM + AUTO CLEANUP)
-    // ==========================================================================
+// HEADLIGHT BEAM LIGHT BLOCK HANDLER (MOVING BEAM + AUTO CLEANUP + INSTANT OFF)
+// ==========================================================================
     private void updateHeadlightBlocks() {
         if (this.level.isClientSide || !(this.level instanceof net.minecraft.server.level.ServerLevel server))
             return;
@@ -184,44 +184,64 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
         int mode = getHeadlightMode();
 
+        // Detect mode change → reset fade transition
         if (mode != lastHeadlightModeSent) {
             headlightFadeProgress = 0;
             lastHeadlightModeSent = mode;
         }
 
-        // If headlights are OFF → full cleanup
+        // ----------------------------------------------------------------------
+        // OFF STATE → INSTANT FULL CLEANUP (no fade, no delay)
+        // ----------------------------------------------------------------------
         if (mode == 0) {
-            clearHeadlightBlocksAround(server, headlightBlock);
+            clearAllHeadlightBlocksImmediately(server, headlightBlock);
             return;
         }
 
-        // Beam and brightness per mode
+        // ----------------------------------------------------------------------
+        // LIGHT INTENSITY AND BEAM DISTANCE PER MODE
+        // ----------------------------------------------------------------------
         final int targetLightLevel = switch (mode) {
-            case 1 -> 5;
-            case 2 -> 10;
-            case 3 -> 15;
-            default -> 0;
-        };
-        final int beamDistance = switch (mode) {
-            case 1 -> 5;
-            case 2 -> 10;
-            case 3 -> 15;
+            case 1 -> 6;   // low beam
+            case 2 -> 11;  // medium beam
+            case 3 -> 15;  // high beam
             default -> 0;
         };
 
-        // Smooth brightness transition
+        // Base range per mode
+        float baseDistance = switch (mode) {
+            case 1 -> 5f;
+            case 2 -> 8f;
+            case 3 -> 12f;
+            default -> 0f;
+        };
+
+        // Extra dynamic boost as headlights fade in (0 → 1)
+        float dynamicBoost = switch (mode) {
+            case 1 -> 1.0f;
+            case 2 -> 2.0f;
+            case 3 -> 4.0f;
+            default -> 0f;
+        };
+
+        // Smooth fade-in
         float fade = (HEADLIGHT_FADE_TICKS <= 0)
                 ? 1.0f
                 : (headlightFadeProgress / (float) HEADLIGHT_FADE_TICKS);
         fade = Math.min(1f, Math.max(0f, fade));
-        final int currentLevel = Math.max(0, Math.min(15, Math.round(targetLightLevel * fade)));
 
-        // Car's forward direction
+        // Dynamic brightness and distance scaling
+        final int currentLevel = Math.round(targetLightLevel * fade);
+        int beamDistance = Math.round(baseDistance + (dynamicBoost * fade));
+
+        // ----------------------------------------------------------------------
+        // BEAM CREATION
+        // ----------------------------------------------------------------------
         double yaw = Math.toRadians(this.getYRot());
         Vec3 forward = new Vec3(-Math.sin(yaw), 0, Math.cos(yaw)).normalize();
 
-        // --- Build current beam positions (set of valid light coordinates) ---
         java.util.Set<BlockPos> beamPositions = new java.util.HashSet<>();
+
         for (int i = 2; i <= beamDistance; i++) {
             Vec3 posVec = this.position().add(forward.scale(i));
             BlockPos bp = new BlockPos(
@@ -229,9 +249,9 @@ public class CardemoEntity extends Mob implements IAnimatable {
                     net.minecraft.util.Mth.floor(this.getY() + 0.4),
                     net.minecraft.util.Mth.floor(posVec.z)
             );
+
             beamPositions.add(bp);
 
-            // Place or update block
             BlockState stateAt = level.getBlockState(bp);
             boolean isOurs = stateAt.getBlock() == headlightBlock;
             boolean canPlace = isOurs || level.isEmptyBlock(bp) || stateAt.getMaterial().isReplaceable();
@@ -239,12 +259,15 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
             BlockState newState = headlightBlock.defaultBlockState()
                     .setValue(net.mcreator.carmodfour.block.InvisibleHeadlightBlock.LIGHT_LEVEL, currentLevel);
+
             server.setBlock(bp, newState, 3);
             server.getChunkSource().getLightEngine().checkBlock(bp);
         }
 
-        // --- Cleanup old lights outside of current beam ---
-        int cleanupRadius = beamDistance + 2; // slightly larger for trailing lights
+        // ----------------------------------------------------------------------
+        // CLEANUP — remove all old light blocks not in beam path
+        // ----------------------------------------------------------------------
+        int cleanupRadius = beamDistance + 2;
         BlockPos carBase = this.blockPosition();
         for (int dx = -cleanupRadius; dx <= cleanupRadius; dx++) {
             for (int dy = -2; dy <= 2; dy++) {
@@ -259,9 +282,32 @@ public class CardemoEntity extends Mob implements IAnimatable {
             }
         }
 
-        // Fade counter increment
+        // ----------------------------------------------------------------------
+        // FADE PROGRESS
+        // ----------------------------------------------------------------------
         if (headlightFadeProgress < HEADLIGHT_FADE_TICKS)
             headlightFadeProgress++;
+    }
+
+    /**
+     * Instantly clears ALL headlight blocks near the car — used when headlights turn OFF.
+     */
+    private void clearAllHeadlightBlocksImmediately(net.minecraft.server.level.ServerLevel server, Block headlightBlock) {
+        int radius = 16;
+        BlockPos base = this.blockPosition();
+
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -3; dy <= 3; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos pos = base.offset(dx, dy, dz);
+                    BlockState st = level.getBlockState(pos);
+                    if (st.getBlock() == headlightBlock) {
+                        server.setBlock(pos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 3);
+                        server.getChunkSource().getLightEngine().checkBlock(pos);
+                    }
+                }
+            }
+        }
     }
 
     /**
