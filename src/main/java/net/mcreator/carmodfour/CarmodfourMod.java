@@ -22,7 +22,8 @@ import net.mcreator.carmodfour.init.CarmodfourModItems;
 import net.mcreator.carmodfour.init.CarmodfourModEntities;
 import net.mcreator.carmodfour.network.DriveStateChangePacket;
 import net.mcreator.carmodfour.network.SteeringInputPacket;
-import net.mcreator.carmodfour.network.BrakeControlPacket; // ✅ NEW IMPORT
+import net.mcreator.carmodfour.network.BrakeControlPacket;
+import net.mcreator.carmodfour.network.HeadlightFlashPacket; // ✅ NEW IMPORT
 
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.BiConsumer;
@@ -100,7 +101,7 @@ public class CarmodfourMod {
         );
 
         // ---------------------------------------------------------------------
-        // ✅ NEW Brake control packet
+        // ✅ Brake control packet
         // Authoritative braking flag (braking overrides acceleration)
         // ---------------------------------------------------------------------
         addNetworkMessage(
@@ -108,6 +109,17 @@ public class CarmodfourMod {
                 BrakeControlPacket::encode,
                 BrakeControlPacket::decode,
                 BrakeControlPacket::handle
+        );
+
+        // ---------------------------------------------------------------------
+        // ✅ NEW Headlight flash packet
+        // Triggers client-side overlay flash when locking/unlocking or door toggle
+        // ---------------------------------------------------------------------
+        addNetworkMessage(
+                HeadlightFlashPacket.class,
+                HeadlightFlashPacket::encode,
+                HeadlightFlashPacket::decode,
+                HeadlightFlashPacket::handle
         );
 
         LOGGER.info("[Carmodfour] Network packets registered successfully!");

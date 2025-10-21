@@ -175,20 +175,77 @@ public class CardemoEntity extends Mob implements IAnimatable {
     public boolean isOwner(Player player) { return owner != null && owner.getUUID().equals(player.getUUID()); }
 
     public VehicleState getState() {
-        try { return VehicleState.valueOf(this.entityData.get(VEHICLE_STATE)); }
-        catch (IllegalArgumentException e) { return VehicleState.LOCKED; }
+        try {
+            return VehicleState.valueOf(this.entityData.get(VEHICLE_STATE));
+        } catch (IllegalArgumentException e) {
+            return VehicleState.LOCKED;
+        }
     }
-    public void setState(VehicleState state) { this.entityData.set(VEHICLE_STATE, state.name()); }
 
+    public void setState(VehicleState state) {
+        this.entityData.set(VEHICLE_STATE, state.name());
+    }
+
+    // ======================================================
+// 🔒 LOCK / ENGINE STATE HELPERS + VISUAL FEEDBACK
+// ======================================================
     public boolean isLocked()   { return getState() == VehicleState.LOCKED; }
     public boolean isEngineOn() { return getState() == VehicleState.ENGINE_ON; }
-    public void setLocked(boolean value)   { setState(value ? VehicleState.LOCKED    : VehicleState.UNLOCKED); }
-    public void setEngineOn(boolean value) { setState(value ? VehicleState.ENGINE_ON : VehicleState.ENGINE_OFF); }
+
+    /**
+     * Sets the locked or unlocked state of the car.
+     *
+     * Behavior:
+     *  • Updates VehicleState synchronously.
+     *  • Plays a confirmation tone:
+     *      - Lock → low pitch
+     *      - Unlock → high pitch
+     *  • Triggers headlight flash once per toggle.
+     *
+     *  This effect occurs ONLY on lock/unlock, never on door open/shut.
+     */
+    public void setLocked(boolean value) {
+        setState(value ? VehicleState.LOCKED : VehicleState.UNLOCKED);
+
+        if (this.level != null && !this.level.isClientSide) {
+            // 🔊 Audio feedback (distinct tone)
+            this.level.playSound(
+                    null,
+                    this.blockPosition(),
+                    net.minecraft.sounds.SoundEvents.NOTE_BLOCK_BELL,
+                    net.minecraft.sounds.SoundSource.BLOCKS,
+                    0.6f,
+                    value ? 0.8f : 1.2f // lower tone = lock, higher tone = unlock
+            );
+
+            // 💡 Send headlight flash to all nearby tracking clients
+            net.mcreator.carmodfour.CarmodfourMod.PACKET_HANDLER.send(
+                    net.minecraftforge.network.PacketDistributor.TRACKING_ENTITY.with(() -> this),
+                    new net.mcreator.carmodfour.network.HeadlightFlashPacket(this.getId())
+            );
+
+            // Also send to the owner directly (for singleplayer / proximity cases)
+            if (this.getOwner() instanceof net.minecraft.server.level.ServerPlayer serverPlayer) {
+                net.mcreator.carmodfour.CarmodfourMod.PACKET_HANDLER.send(
+                        net.minecraftforge.network.PacketDistributor.PLAYER.with(() -> serverPlayer),
+                        new net.mcreator.carmodfour.network.HeadlightFlashPacket(this.getId())
+                );
+            }
+        }
+    }
+
+    public void setEngineOn(boolean value) {
+        setState(value ? VehicleState.ENGINE_ON : VehicleState.ENGINE_OFF);
+    }
 
     public DriveState getDriveState() {
-        try { return DriveState.valueOf(this.entityData.get(DRIVE_MODE)); }
-        catch (IllegalArgumentException e) { return DriveState.PARK; }
+        try {
+            return DriveState.valueOf(this.entityData.get(DRIVE_MODE));
+        } catch (IllegalArgumentException e) {
+            return DriveState.PARK;
+        }
     }
+
     public void setDriveState(DriveState state) { this.entityData.set(DRIVE_MODE, state.name()); }
 
     public boolean isDoorOpen() { return this.entityData.get(DOOR_OPEN); }
@@ -401,9 +458,9 @@ public class CardemoEntity extends Mob implements IAnimatable {
         this.setYRot(this.getYRot() + currentTurnRate);
         double yawRad = Math.toRadians(this.getYRot());
 
-        // ---------------------------------------------------------------------
-        // 🧩 BUMP DETECTION (velocity-scaled HP loss + anvil sound intensity)
-        // ---------------------------------------------------------------------
+// ---------------------------------------------------------------------
+// 🧩 BUMP DETECTION (velocity-scaled HP loss + anvil sound intensity)
+// ---------------------------------------------------------------------
         if (currentSpeed > 0.05 && recoilCooldown == 0) {
             boolean frontHit = !reverse && isBlockedAheadOrTooSteep(yawRad);
             boolean rearHit  =  reverse && isBlockedBehindOrTooSteep(yawRad);
@@ -424,6 +481,11 @@ public class CardemoEntity extends Mob implements IAnimatable {
                     float pitch = 0.75f + (float) Math.min(impactSpeedBps / 20.0f, 0.3f);
                     this.level.playSound(null, this.blockPosition(),
                             SoundEvents.ANVIL_PLACE, SoundSource.BLOCKS, vol, pitch);
+                }
+
+                // 💡 Trigger brief headlight flash client-side on impact
+                if (this.level.isClientSide) {
+                    net.mcreator.carmodfour.client.renderer.CardemoRenderer.triggerHeadlightFlash(this);
                 }
 
                 triggerRecoil(yawRad, rearHit);
@@ -1061,19 +1123,26 @@ public class CardemoEntity extends Mob implements IAnimatable {
     }
 
     private void playDoorSound(boolean opening, Player source) {
-        if (this.level.isClientSide) return;
-        float dist   = (source != null) ? (float) source.distanceTo(this) : 0f;
-        float volume = Math.max(0.35f, 1.0f - (dist / 24.0f));
-        float pitch  = Math.max(0.75f, 1.0f - (dist / 48.0f));
+        if (this.level == null) return;
 
-        this.level.playSound(
-                null,
-                this.blockPosition(),
-                opening ? SoundEvents.IRON_DOOR_OPEN : SoundEvents.IRON_DOOR_CLOSE,
-                SoundSource.BLOCKS,
-                volume,
-                pitch
-        );
+        // --- Play the metallic door sound (server only) ---
+        if (!this.level.isClientSide) {
+            float dist   = (source != null) ? (float) source.distanceTo(this) : 0f;
+            float volume = Math.max(0.35f, 1.0f - (dist / 24.0f));
+            float pitch  = Math.max(0.75f, 1.0f - (dist / 48.0f));
+
+            this.level.playSound(
+                    null,
+                    this.blockPosition(),
+                    opening ? SoundEvents.IRON_DOOR_OPEN : SoundEvents.IRON_DOOR_CLOSE,
+                    SoundSource.BLOCKS,
+                    volume,
+                    pitch
+            );
+
+            // 🚫 Removed: No headlight flash trigger here.
+            // Flash is now triggered *only* by setLocked(true/false).
+        }
     }
 
     // ==========================================================================
