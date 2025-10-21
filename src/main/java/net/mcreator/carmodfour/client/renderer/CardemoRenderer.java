@@ -149,9 +149,33 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
                         return;
                     }
 
-                    // Smooth 2s flicker → double pulse
-                    float phase = (elapsed / 2000f) * (float)Math.PI * 2f;
-                    float intensity = (float)Math.abs(Math.sin(phase * 2f)) * 0.9f;
+// Two flashes (~0.85s total) with extended fade only on the second
+                    float total = 850f; // total duration (ms)
+                    float phase = (elapsed / total) * (float)Math.PI;
+                    float raw = (float)Math.abs(Math.sin(phase * 1.8f));
+
+                    // Apply fade only after halfway point (second flash)
+                    float fade = 1.0f;
+                    if (elapsed > total * 0.5f) {
+                        float t = (elapsed - total * 0.5f) / (total * 0.5f); // 0 → 1 over second half
+                        fade = 1.0f - (float)Math.pow(t, 1.6); // gentle tail fade
+                    }
+
+                    float intensity = raw * fade * 0.9f;
+
+                    if (elapsed > total) {
+                        headlightFlashActive = false;
+                        return;
+                    }
+
+                    if (intensity > 0.02f) {
+                        GeoModelProvider<CardemoEntity> provider = this.getEntityModel();
+                        GeoModel model = provider.getModel(provider.getModelResource(entity));
+                        renderEmissive(model, stack, bufferIn, entity, HEADLIGHT_EMISSIVE, intensity);
+                    }
+
+
+
 
                     if (intensity > 0.02f) {
                         GeoModelProvider<CardemoEntity> provider = this.getEntityModel();
