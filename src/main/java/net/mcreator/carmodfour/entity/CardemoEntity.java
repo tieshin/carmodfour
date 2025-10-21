@@ -47,6 +47,11 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.chat.Style;
 import net.minecraft.network.chat.TextColor;
+// --- Headlight block lookup / state building ---
+import net.minecraft.resources.ResourceLocation;
+import net.minecraftforge.registries.ForgeRegistries;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
 
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -156,6 +161,130 @@ public class CardemoEntity extends Mob implements IAnimatable {
     private static final EntityDataAccessor<Integer> HEADLIGHT_MODE =
             SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.INT);
 
+    // ==========================================================================
+    // HEADLIGHT LIGHT INTERNAL STATE (FADE)
+    // ==========================================================================
+    private static final String HEADLIGHT_BLOCK_ID = "carmodfour:invis_headlight";
+    private static final int    HEADLIGHT_FADE_TICKS = 10;
+
+    private int  headlightFadeProgress = 0;  // 0..HEADLIGHT_FADE_TICKS
+    private int  lastHeadlightModeSent = -1; // track mode changes to restart fade
+
+
+    // ==========================================================================
+    // HEADLIGHT BEAM LIGHT BLOCK HANDLER (MOVING BEAM + AUTO CLEANUP)
+    // ==========================================================================
+    private void updateHeadlightBlocks() {
+        if (this.level.isClientSide || !(this.level instanceof net.minecraft.server.level.ServerLevel server))
+            return;
+
+        Block headlightBlock = ForgeRegistries.BLOCKS.getValue(new ResourceLocation(HEADLIGHT_BLOCK_ID));
+        if (headlightBlock == null)
+            return;
+
+        int mode = getHeadlightMode();
+
+        if (mode != lastHeadlightModeSent) {
+            headlightFadeProgress = 0;
+            lastHeadlightModeSent = mode;
+        }
+
+        // If headlights are OFF → full cleanup
+        if (mode == 0) {
+            clearHeadlightBlocksAround(server, headlightBlock);
+            return;
+        }
+
+        // Beam and brightness per mode
+        final int targetLightLevel = switch (mode) {
+            case 1 -> 7;
+            case 2 -> 12;
+            case 3 -> 15;
+            default -> 0;
+        };
+        final int beamDistance = switch (mode) {
+            case 1 -> 3;
+            case 2 -> 5;
+            case 3 -> 8;
+            default -> 0;
+        };
+
+        // Smooth brightness transition
+        float fade = (HEADLIGHT_FADE_TICKS <= 0)
+                ? 1.0f
+                : (headlightFadeProgress / (float) HEADLIGHT_FADE_TICKS);
+        fade = Math.min(1f, Math.max(0f, fade));
+        final int currentLevel = Math.max(0, Math.min(15, Math.round(targetLightLevel * fade)));
+
+        // Car's forward direction
+        double yaw = Math.toRadians(this.getYRot());
+        Vec3 forward = new Vec3(-Math.sin(yaw), 0, Math.cos(yaw)).normalize();
+
+        // --- Build current beam positions (set of valid light coordinates) ---
+        java.util.Set<BlockPos> beamPositions = new java.util.HashSet<>();
+        for (int i = 2; i <= beamDistance; i++) {
+            Vec3 posVec = this.position().add(forward.scale(i));
+            BlockPos bp = new BlockPos(
+                    net.minecraft.util.Mth.floor(posVec.x),
+                    net.minecraft.util.Mth.floor(this.getY() + 0.4),
+                    net.minecraft.util.Mth.floor(posVec.z)
+            );
+            beamPositions.add(bp);
+
+            // Place or update block
+            BlockState stateAt = level.getBlockState(bp);
+            boolean isOurs = stateAt.getBlock() == headlightBlock;
+            boolean canPlace = isOurs || level.isEmptyBlock(bp) || stateAt.getMaterial().isReplaceable();
+            if (!canPlace) continue;
+
+            BlockState newState = headlightBlock.defaultBlockState()
+                    .setValue(net.mcreator.carmodfour.block.InvisibleHeadlightBlock.LIGHT_LEVEL, currentLevel);
+            server.setBlock(bp, newState, 3);
+            server.getChunkSource().getLightEngine().checkBlock(bp);
+        }
+
+        // --- Cleanup old lights outside of current beam ---
+        int cleanupRadius = beamDistance + 2; // slightly larger for trailing lights
+        BlockPos carBase = this.blockPosition();
+        for (int dx = -cleanupRadius; dx <= cleanupRadius; dx++) {
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dz = -cleanupRadius; dz <= cleanupRadius; dz++) {
+                    BlockPos testPos = carBase.offset(dx, dy, dz);
+                    BlockState state = level.getBlockState(testPos);
+                    if (state.getBlock() == headlightBlock && !beamPositions.contains(testPos)) {
+                        server.setBlock(testPos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 3);
+                        server.getChunkSource().getLightEngine().checkBlock(testPos);
+                    }
+                }
+            }
+        }
+
+        // Fade counter increment
+        if (headlightFadeProgress < HEADLIGHT_FADE_TICKS)
+            headlightFadeProgress++;
+    }
+
+    /**
+     * Clears previously placed headlight blocks in a small radius around the car.
+     */
+    private void clearHeadlightBlocksAround(net.minecraft.server.level.ServerLevel server, Block headlightBlock) {
+        if (headlightBlock == null) return;
+
+        int radius = 8;
+        BlockPos base = this.blockPosition();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos pos = base.offset(dx, dy, dz);
+                    var st = level.getBlockState(pos);
+                    if (st.getBlock() == headlightBlock) {
+                        server.setBlock(pos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 3);
+                        server.getChunkSource().getLightEngine().checkBlock(pos);
+                    }
+                }
+            }
+        }
+    }
 
     // ==========================================================================
     // BUMP / RECOIL SYSTEM (ROBUST)
@@ -202,8 +331,8 @@ public class CardemoEntity extends Mob implements IAnimatable {
     }
 
     // ======================================================
-// 🔒 LOCK / ENGINE STATE HELPERS + VISUAL FEEDBACK
-// ======================================================
+    // 🔒 LOCK / ENGINE STATE HELPERS + VISUAL FEEDBACK
+    // ======================================================
     public boolean isLocked()   { return getState() == VehicleState.LOCKED; }
     public boolean isEngineOn() { return getState() == VehicleState.ENGINE_ON; }
 
@@ -353,17 +482,49 @@ public class CardemoEntity extends Mob implements IAnimatable {
     @Override
     public void tick() {
         super.tick();
+
+        // ---------------------------------------------------------------------
+        // 🔄 Cooldowns & recoil
+        // ---------------------------------------------------------------------
         if (recoilCooldown > 0) recoilCooldown--;
+
+        // ---------------------------------------------------------------------
+        // 🧠 SERVER-SIDE LOGIC — movement, collisions, headlights
+        // ---------------------------------------------------------------------
         if (!level.isClientSide) {
-            if (isEngineOn()) {
+            boolean engineOn = isEngineOn();
+
+            if (engineOn) {
+                // --- Handle driving physics ---
                 switch (getDriveState()) {
                     case DRIVE   -> handleDriveMode();
                     case REVERSE -> handleReverseMode();
                     case PARK    -> handleParkMode();
                 }
+
+                // --- Handle collisions (damage + recoil) ---
                 handleEntityCollisions();
+
+                // --- NEW: Update invisible light blocks for headlights ---
+                updateHeadlightBlocks();
+
+            } else {
+                // --- NEW: Engine OFF → clear remaining headlight blocks ---
+                if (this.level instanceof net.minecraft.server.level.ServerLevel server) {
+                    clearHeadlightBlocksAround(
+                            server,
+                            net.mcreator.carmodfour.init.CarmodfourModBlocks.INVIS_HEADLIGHT.get()
+                    );
+                }
             }
-        } else updateClientSpeedOverlay();
+        }
+
+        // ---------------------------------------------------------------------
+        // 🎨 CLIENT-SIDE LOGIC — overlays, HUD, camera
+        // ---------------------------------------------------------------------
+        else {
+            updateClientSpeedOverlay();
+        }
     }
 
     // --------------------------------------------------------------------------

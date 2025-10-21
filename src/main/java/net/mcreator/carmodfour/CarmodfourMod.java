@@ -8,10 +8,10 @@ import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
+import net.minecraftforge.network.NetworkEvent;
 
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.network.FriendlyByteBuf;
-import net.minecraftforge.network.NetworkEvent;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -20,11 +20,8 @@ import software.bernie.geckolib3.GeckoLib;
 
 import net.mcreator.carmodfour.init.CarmodfourModItems;
 import net.mcreator.carmodfour.init.CarmodfourModEntities;
-import net.mcreator.carmodfour.network.DriveStateChangePacket;
-import net.mcreator.carmodfour.network.SteeringInputPacket;
-import net.mcreator.carmodfour.network.BrakeControlPacket;
-import net.mcreator.carmodfour.network.HeadlightFlashPacket;
-import net.mcreator.carmodfour.network.HeadlightBrightnessPacket; // ✅ NEW IMPORT
+import net.mcreator.carmodfour.init.CarmodfourModBlocks;
+import net.mcreator.carmodfour.network.*;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.BiConsumer;
@@ -40,10 +37,10 @@ import java.util.AbstractMap;
  * =============================================================================
  *
  * Handles:
- *   ✓ Registry initialization
- *   ✓ GeckoLib startup
+ *   ✓ Registry initialization (Blocks, Items, Entities)
+ *   ✓ GeckoLib initialization
  *   ✓ Network packet registration
- *   ✓ Server work queue (MCreator-style)
+ *   ✓ Server tick work queue
  * =============================================================================
  */
 @Mod(CarmodfourMod.MODID)
@@ -66,18 +63,26 @@ public class CarmodfourMod {
     private static int messageID = 0;
 
     // -------------------------------------------------------------------------
-    // CONSTRUCTOR — registration entry point
+    // CONSTRUCTOR — initialization entry point
     // -------------------------------------------------------------------------
     public CarmodfourMod() {
         IEventBus bus = FMLJavaModLoadingContext.get().getModEventBus();
+
+        // ✅ Register all core content
+        CarmodfourModBlocks.register(bus);
         CarmodfourModItems.REGISTRY.register(bus);
         CarmodfourModEntities.REGISTRY.register(bus);
 
-        GeckoLib.initialize(); // ✅ GeckoLib initialization
+        // ✅ Initialize GeckoLib for animation support
+        GeckoLib.initialize();
 
+        // ✅ Subscribe to Forge’s event bus
         MinecraftForge.EVENT_BUS.register(this);
 
+        // ✅ Register custom network packets
         registerPackets();
+
+        LOGGER.info("[Carmodfour] Initialization complete.");
     }
 
     // -------------------------------------------------------------------------
@@ -85,9 +90,7 @@ public class CarmodfourMod {
     // -------------------------------------------------------------------------
     private void registerPackets() {
 
-        // ---------------------------------------------------------------------
-        // Drive state changes (PARK/DRIVE/REVERSE)
-        // ---------------------------------------------------------------------
+        // --- Drive state changes (PARK / DRIVE / REVERSE)
         addNetworkMessage(
                 DriveStateChangePacket.class,
                 DriveStateChangePacket::toBytes,
@@ -95,9 +98,7 @@ public class CarmodfourMod {
                 DriveStateChangePacket::handle
         );
 
-        // ---------------------------------------------------------------------
-        // Steering input sync
-        // ---------------------------------------------------------------------
+        // --- Steering input sync
         addNetworkMessage(
                 SteeringInputPacket.class,
                 SteeringInputPacket::toBytes,
@@ -105,10 +106,7 @@ public class CarmodfourMod {
                 SteeringInputPacket::handle
         );
 
-        // ---------------------------------------------------------------------
-        // ✅ Brake control packet
-        // Authoritative braking flag (braking overrides acceleration)
-        // ---------------------------------------------------------------------
+        // --- Brake control packet (authoritative braking flag)
         addNetworkMessage(
                 BrakeControlPacket.class,
                 BrakeControlPacket::encode,
@@ -116,10 +114,7 @@ public class CarmodfourMod {
                 BrakeControlPacket::handle
         );
 
-        // ---------------------------------------------------------------------
-        // ✅ Headlight flash packet
-        // Triggers client-side overlay flash when locking/unlocking or door toggle
-        // ---------------------------------------------------------------------
+        // --- Headlight flash packet (lock/unlock feedback)
         addNetworkMessage(
                 HeadlightFlashPacket.class,
                 HeadlightFlashPacket::encode,
@@ -127,10 +122,7 @@ public class CarmodfourMod {
                 HeadlightFlashPacket::handle
         );
 
-        // ---------------------------------------------------------------------
-        // ✅ NEW Headlight brightness packet
-        // Cycles the car’s headlight brightness (L0 → L1 → L2 → L3 → L0)
-        // ---------------------------------------------------------------------
+        // --- Headlight brightness packet (cycles L0 → L1 → L2 → L3 → L0)
         addNetworkMessage(
                 HeadlightBrightnessPacket.class,
                 HeadlightBrightnessPacket::encode,
@@ -138,23 +130,23 @@ public class CarmodfourMod {
                 HeadlightBrightnessPacket::handle
         );
 
-        LOGGER.info("[Carmodfour] Network packets registered successfully!");
+        LOGGER.info("[Carmodfour] ✅ Network packets registered successfully.");
     }
 
     // -------------------------------------------------------------------------
-    // GENERIC NETWORK REGISTRATION WRAPPER (used by all packets)
+    // GENERIC NETWORK REGISTRATION WRAPPER
     // -------------------------------------------------------------------------
     public static <T> void addNetworkMessage(
             Class<T> messageType,
             BiConsumer<T, FriendlyByteBuf> encoder,
             Function<FriendlyByteBuf, T> decoder,
-            BiConsumer<T, Supplier<NetworkEvent.Context>> messageConsumer
+            BiConsumer<T, Supplier<NetworkEvent.Context>> handler
     ) {
-        PACKET_HANDLER.registerMessage(messageID++, messageType, encoder, decoder, messageConsumer);
+        PACKET_HANDLER.registerMessage(messageID++, messageType, encoder, decoder, handler);
     }
 
     // -------------------------------------------------------------------------
-    // SERVER WORK QUEUE (standard MCreator behavior)
+    // SERVER WORK QUEUE (standard MCreator-style)
     // -------------------------------------------------------------------------
     private static final ConcurrentLinkedQueue<AbstractMap.SimpleEntry<Runnable, Integer>> workQueue =
             new ConcurrentLinkedQueue<>();
@@ -167,10 +159,10 @@ public class CarmodfourMod {
     public void tick(TickEvent.ServerTickEvent event) {
         if (event.phase == TickEvent.Phase.END) {
             List<AbstractMap.SimpleEntry<Runnable, Integer>> actions = new ArrayList<>();
-            workQueue.forEach(work -> {
-                work.setValue(work.getValue() - 1);
-                if (work.getValue() <= 0)
-                    actions.add(work);
+            workQueue.forEach(entry -> {
+                entry.setValue(entry.getValue() - 1);
+                if (entry.getValue() <= 0)
+                    actions.add(entry);
             });
             actions.forEach(e -> e.getKey().run());
             workQueue.removeAll(actions);
