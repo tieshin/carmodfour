@@ -23,6 +23,7 @@ package net.mcreator.carmodfour.entity;
  */
 
 import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -39,6 +40,13 @@ import software.bernie.geckolib3.core.IAnimatable;
 import net.minecraftforge.network.PlayMessages;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import net.minecraft.network.chat.Style;
+import net.minecraft.network.chat.TextColor;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Style;
+import net.minecraft.network.chat.TextColor;
 
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -414,7 +422,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
             boolean hornDown = net.mcreator.carmodfour.client.DriveStateKeybindHandler.HORN_KEY.isDown();
             String horn = hornDown ? "§cH§r" : "H";
 
-            // --- Turn signal indicators (updated) ---
+// --- Turn signal indicators (gray when off or between flashes) ---
             boolean leftActive  = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isLeftSignalOn();
             boolean rightActive = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isRightSignalOn();
             boolean leftVisible  = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isLeftSignalVisible();
@@ -422,35 +430,38 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
             String leftArrow;
             if (leftActive) {
-                leftArrow = leftVisible ? "§e<§r" : "";  // blink yellow → vanish fully
+                // Active: blink between yellow and gray
+                leftArrow = leftVisible ? "§e<§r" : "§7<§r";  // §e = yellow, §7 = gray
             } else {
-                leftArrow = "<"; // steady white when inactive
+                // Not active: solid gray
+                leftArrow = "§7<§r";
             }
 
             String rightArrow;
             if (rightActive) {
-                rightArrow = rightVisible ? "§e>§r" : ""; // blink yellow → vanish fully
+                rightArrow = rightVisible ? "§e>§r" : "§7>§r";
             } else {
-                rightArrow = ">"; // steady white when inactive
+                rightArrow = "§7>§r";
             }
 
-            // --- NEW: Headlight indicator ---
+// --- NEW: Headlight indicator (single-hue fading yellow) ---
             int hl = getHeadlightMode();
-            String hlSymbol = switch (hl) {
-                case 1 -> "§cL§r";   // Low = dark orange-red (warm amber glow)
-                case 2 -> "§6L§r";   // Medium = orange (standard halogen brightness)
-                case 3 -> "§eL§r";   // High = yellow (bright, clear beam)
-                default -> "§8L§r";  // Off = dark gray (inactive)
+            MutableComponent hlSymbol = switch (hl) {
+                case 1 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0x9A9A4A))); // Low - dull faded yellow-gray
+                case 2 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0xE6C34A))); // Medium - warm pale yellow
+                case 3 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0xFFF76B))); // High - bright yellow-white
+                default -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0x444444))); // Off - dim gray
             };
 
-            // --- Build final overlay line ---
-            String text = String.format(
-                    "%s || %s || | %s | %s | %s |  ||  %.1f b/s  ||  HP : %s%d§r / %d || %s || %s",
-                    leftArrow, horn, p, d, r, speed, colorCode, hpInt, maxInt, hlSymbol, rightArrow
-            );
+// --- Build the overlay as a Component ---
+            MutableComponent overlay = Component.literal(
+                            String.format("%s || %s || | %s | %s | %s |  ||  %.1f b/s  ||  HP : %s%d§r / %d || ",
+                                    leftArrow, horn, p, d, r, speed, colorCode, hpInt, maxInt)
+                    ).append(hlSymbol)
+                    .append(Component.literal(String.format(" || %s", rightArrow)));
 
-            // --- Display overlay (above hotbar) ---
-            mc.gui.setOverlayMessage(net.minecraft.network.chat.Component.literal(text), false);
+// --- Display overlay (above hotbar) ---
+            mc.gui.setOverlayMessage(overlay, false);
         }
     }
 
