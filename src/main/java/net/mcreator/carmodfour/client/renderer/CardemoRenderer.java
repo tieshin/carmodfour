@@ -26,13 +26,15 @@ import net.mcreator.carmodfour.entity.model.CardemoModel;
 import java.util.ArrayDeque;
 
 /**
- * CardemoRenderer
- *
- * Unified smooth visual dynamics:
- *  - Terrain tilt and wall roll
- *  - Anti-intersection tilt (front/back/side)
- *  - Spring-damped lift and recoil smoothing
- *  - Emissive overlays (blinkers, brake lights, headlights)
+ * ============================================================================
+ *  CardemoRenderer.java
+ *  ---------------------
+ *  Unified visual renderer for CardemoEntity:
+ *    ✓ Terrain tilt and wall roll
+ *    ✓ Smooth suspension spring dynamics
+ *    ✓ Blinkers, brake lights, and headlights
+ *    ✓ Flash overlay for lock/unlock confirmation
+ * ============================================================================
  */
 public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
 
@@ -93,7 +95,7 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
         this.shadowRadius = 1.0f;
 
         // ===========================================================
-        // EMISSIVE OVERLAY LAYER (Blinkers + Brake lights)
+        // BLINKERS + BRAKE LIGHTS OVERLAY
         // ===========================================================
         this.addLayer(new GeoLayerRenderer<CardemoEntity>(this) {
             @Override
@@ -131,6 +133,39 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
         });
 
         // ===========================================================
+        // NEW — HEADLIGHT BRIGHTNESS OVERLAY (L0–L3)
+        // ===========================================================
+        this.addLayer(new GeoLayerRenderer<CardemoEntity>(this) {
+            @Override
+            public void render(PoseStack stack, MultiBufferSource bufferIn, int packedLightIn,
+                               CardemoEntity entity, float limbSwing, float limbSwingAmount,
+                               float partialTicks, float ageInTicks, float netHeadYaw, float headPitch) {
+
+                if (entity == null || entity.level == null || !entity.level.isClientSide) return;
+                if (!entity.isEngineOn()) return;
+
+                int hl = entity.getHeadlightMode();
+                if (hl <= 0) return;
+
+                float alpha = switch (hl) {
+                    case 1 -> 0.20f; // low beams
+                    case 2 -> 0.50f; // medium
+                    case 3 -> 1.00f; // high
+                    default -> 0f;
+                };
+                if (alpha <= 0.01f) return;
+
+                GeoModelProvider<CardemoEntity> provider = this.getEntityModel();
+                GeoModel model = provider.getModel(provider.getModelResource(entity));
+
+                RenderType rt = RenderType.entityTranslucentEmissive(HEADLIGHT_EMISSIVE);
+                VertexConsumer vc = bufferIn.getBuffer(rt);
+                this.getRenderer().render(model, entity, 0, rt, stack, bufferIn, vc,
+                        0xF000F0, OverlayTexture.NO_OVERLAY, 1f, 1f, 1f, alpha);
+            }
+        });
+
+        // ===========================================================
         // HEADLIGHT FLASH OVERLAY (Lock/Unlock confirmation)
         // ===========================================================
         this.addLayer(new GeoLayerRenderer<CardemoEntity>(this) {
@@ -140,48 +175,29 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
                                float partialTicks, float ageInTicks, float netHeadYaw, float headPitch) {
 
                 if (!entity.level.isClientSide) return;
+                if (entity.getId() != headlightFlashEntity || !headlightFlashActive) return;
 
-                // Check if this entity triggered a door sound recently
-                if (entity.getId() == headlightFlashEntity && headlightFlashActive) {
-                    long elapsed = System.currentTimeMillis() - headlightFlashStart;
-                    if (elapsed > 2000) {
-                        headlightFlashActive = false;
-                        return;
-                    }
+                long elapsed = System.currentTimeMillis() - headlightFlashStart;
+                if (elapsed > 2000) {
+                    headlightFlashActive = false;
+                    return;
+                }
 
-// Two flashes (~0.85s total) with extended fade only on the second
-                    float total = 850f; // total duration (ms)
-                    float phase = (elapsed / total) * (float)Math.PI;
-                    float raw = (float)Math.abs(Math.sin(phase * 1.8f));
+                float total = 850f;
+                float phase = (elapsed / total) * (float) Math.PI;
+                float raw = (float) Math.abs(Math.sin(phase * 1.8f));
 
-                    // Apply fade only after halfway point (second flash)
-                    float fade = 1.0f;
-                    if (elapsed > total * 0.5f) {
-                        float t = (elapsed - total * 0.5f) / (total * 0.5f); // 0 → 1 over second half
-                        fade = 1.0f - (float)Math.pow(t, 1.6); // gentle tail fade
-                    }
+                float fade = 1.0f;
+                if (elapsed > total * 0.5f) {
+                    float t = (elapsed - total * 0.5f) / (total * 0.5f);
+                    fade = 1.0f - (float) Math.pow(t, 1.6);
+                }
 
-                    float intensity = raw * fade * 0.9f;
-
-                    if (elapsed > total) {
-                        headlightFlashActive = false;
-                        return;
-                    }
-
-                    if (intensity > 0.02f) {
-                        GeoModelProvider<CardemoEntity> provider = this.getEntityModel();
-                        GeoModel model = provider.getModel(provider.getModelResource(entity));
-                        renderEmissive(model, stack, bufferIn, entity, HEADLIGHT_EMISSIVE, intensity);
-                    }
-
-
-
-
-                    if (intensity > 0.02f) {
-                        GeoModelProvider<CardemoEntity> provider = this.getEntityModel();
-                        GeoModel model = provider.getModel(provider.getModelResource(entity));
-                        renderEmissive(model, stack, bufferIn, entity, HEADLIGHT_EMISSIVE, intensity);
-                    }
+                float intensity = raw * fade * 0.9f;
+                if (intensity > 0.02f) {
+                    GeoModelProvider<CardemoEntity> provider = this.getEntityModel();
+                    GeoModel model = provider.getModel(provider.getModelResource(entity));
+                    renderEmissive(model, stack, bufferIn, entity, HEADLIGHT_EMISSIVE, intensity);
                 }
             }
 
@@ -196,7 +212,7 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
     }
 
     // ===============================================================
-    // EXTERNAL TRIGGER (Called from playDoorSound in CardemoEntity)
+    // EXTERNAL TRIGGER (Headlight flash on lock/unlock or bump)
     // ===============================================================
     public static void triggerHeadlightFlash(CardemoEntity entity) {
         if (entity == null || entity.level == null || !entity.level.isClientSide) return;
@@ -212,13 +228,13 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
     public void render(CardemoEntity entity, float entityYaw, float partialTicks,
                        PoseStack stack, MultiBufferSource bufferIn, int packedLightIn) {
         stack.pushPose();
-        stack.scale(2.0f, 2.0f, 2.0f); // restore full car scale
+        stack.scale(2.0f, 2.0f, 2.0f);
         super.render(entity, entityYaw, partialTicks, stack, bufferIn, packedLightIn);
         stack.popPose();
     }
 
     // ===============================================================
-    // ROTATIONS + TERRAIN TILT + SPRING DYNAMICS
+    // ROTATION + SPRING DYNAMICS + TERRAIN ADAPTATION
     // ===============================================================
     @Override
     protected void applyRotations(CardemoEntity entity, PoseStack stack,
@@ -247,7 +263,7 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
         BlockPos basePos = new BlockPos(pos.x, pos.y, pos.z);
         float tiltX = 0f, tiltZ = 0f, lift = 0f;
 
-        // Wall proximity + rear bumper checks (unchanged physics)
+        // Wall proximity + rear bumper checks
         for (int dx = -1; dx <= 1; dx++) {
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dz = -1; dz <= 1; dz++) {

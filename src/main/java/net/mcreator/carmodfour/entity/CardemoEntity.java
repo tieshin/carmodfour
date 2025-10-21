@@ -143,6 +143,13 @@ public class CardemoEntity extends Mob implements IAnimatable {
     private static void dlog(boolean on, String msg) { if (on) System.out.println("[Cardemo] " + msg); }
 
     // ==========================================================================
+    // HEADLIGHT DATA (BRIGHTNESS LEVEL)
+    // ==========================================================================
+    private static final EntityDataAccessor<Integer> HEADLIGHT_MODE =
+            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.INT);
+
+
+    // ==========================================================================
     // BUMP / RECOIL SYSTEM (ROBUST)
     // ==========================================================================
 
@@ -236,6 +243,10 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
     public void setEngineOn(boolean value) {
         setState(value ? VehicleState.ENGINE_ON : VehicleState.ENGINE_OFF);
+        // --- Auto-off headlights when engine stops ---
+        if (!value) {
+            setHeadlightMode(0);
+        }
     }
 
     public DriveState getDriveState() {
@@ -250,6 +261,44 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
     public boolean isDoorOpen() { return this.entityData.get(DOOR_OPEN); }
     public void setDoorOpen(boolean open) { this.entityData.set(DOOR_OPEN, open); }
+
+    // ======================================================
+    // 💡 HEADLIGHT BRIGHTNESS CONTROL
+    // ======================================================
+
+    /** Returns the current headlight brightness level (0–3). */
+    public int getHeadlightMode() {
+        return this.entityData.get(HEADLIGHT_MODE);
+    }
+
+    /** Sets the headlight brightness level (0–3, clamped). */
+    public void setHeadlightMode(int level) {
+        this.entityData.set(HEADLIGHT_MODE, Math.max(0, Math.min(3, level)));
+    }
+
+    /**
+     * Cycles headlight brightness through levels:
+     *   0 (Off) → 1 (Dim) → 2 (Normal) → 3 (Bright) → 0
+     * Also plays a short feedback sound for each step.
+     */
+    public void cycleHeadlightMode() {
+        int next = (getHeadlightMode() + 1) % 4;
+        setHeadlightMode(next);
+
+        if (this.level != null && !this.level.isClientSide) {
+            float pitch = 0.8f + (0.1f * next);
+            this.level.playSound(null, this.blockPosition(),
+                    SoundEvents.LEVER_CLICK, SoundSource.BLOCKS, 0.6f, pitch);
+
+            // Flash headlights when toggled on (skip for 0/off)
+            if (next > 0) {
+                net.mcreator.carmodfour.CarmodfourMod.PACKET_HANDLER.send(
+                        net.minecraftforge.network.PacketDistributor.TRACKING_ENTITY.with(() -> this),
+                        new net.mcreator.carmodfour.network.HeadlightFlashPacket(this.getId())
+                );
+            }
+        }
+    }
 
     public String getTexture()         { return this.entityData.get(TEXTURE); }
     public String getSyncedAnimation() { return this.entityData.get(ANIMATION); }
@@ -271,6 +320,8 @@ public class CardemoEntity extends Mob implements IAnimatable {
         this.entityData.define(DOOR_OPEN, false);
         this.entityData.define(DRIVE_MODE, DriveState.PARK.name());
         this.entityData.define(ROLL_SYNC, 0.0f);
+        // --- NEW: Headlight brightness level (0 = off, 1 = dim, 2 = normal, 3 = bright) ---
+        this.entityData.define(HEADLIGHT_MODE, 0);
     }
 
     @Override
@@ -279,6 +330,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         tag.putString("DriveState", getDriveState().name());
         tag.putString("VehicleState", getState().name());
         tag.putBoolean("DoorOpen", isDoorOpen());
+        tag.putInt("HeadlightMode", getHeadlightMode());
     }
 
     @Override
@@ -287,6 +339,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         if (tag.contains("DriveState")) setDriveState(DriveState.valueOf(tag.getString("DriveState")));
         if (tag.contains("VehicleState")) setState(VehicleState.valueOf(tag.getString("VehicleState")));
         if (tag.contains("DoorOpen")) setDoorOpen(tag.getBoolean("DoorOpen"));
+        if (tag.contains("HeadlightMode")) setHeadlightMode(tag.getInt("HeadlightMode"));
     }
 
     @Override
@@ -381,10 +434,19 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 rightArrow = ">"; // steady white when inactive
             }
 
+            // --- NEW: Headlight indicator ---
+            int hl = getHeadlightMode();
+            String hlSymbol = switch (hl) {
+                case 1 -> "§cL§r";   // Low = dark orange-red (warm amber glow)
+                case 2 -> "§6L§r";   // Medium = orange (standard halogen brightness)
+                case 3 -> "§eL§r";   // High = yellow (bright, clear beam)
+                default -> "§8L§r";  // Off = dark gray (inactive)
+            };
+
             // --- Build final overlay line ---
             String text = String.format(
-                    "%s || %s || | %s | %s | %s |  ||  %.1f b/s  ||  HP : %s%d§r / %d || %s",
-                    leftArrow, horn, p, d, r, speed, colorCode, hpInt, maxInt, rightArrow
+                    "%s || %s || | %s | %s | %s |  ||  %.1f b/s  ||  HP : %s%d§r / %d || %s || %s",
+                    leftArrow, horn, p, d, r, speed, colorCode, hpInt, maxInt, hlSymbol, rightArrow
             );
 
             // --- Display overlay (above hotbar) ---

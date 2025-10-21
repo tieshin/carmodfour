@@ -23,7 +23,8 @@ import net.mcreator.carmodfour.init.CarmodfourModEntities;
 import net.mcreator.carmodfour.network.DriveStateChangePacket;
 import net.mcreator.carmodfour.network.SteeringInputPacket;
 import net.mcreator.carmodfour.network.BrakeControlPacket;
-import net.mcreator.carmodfour.network.HeadlightFlashPacket; // ✅ NEW IMPORT
+import net.mcreator.carmodfour.network.HeadlightFlashPacket;
+import net.mcreator.carmodfour.network.HeadlightBrightnessPacket; // ✅ NEW IMPORT
 
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.BiConsumer;
@@ -34,13 +35,16 @@ import java.util.ArrayList;
 import java.util.AbstractMap;
 
 /**
- * CarmodfourMod — Core mod entrypoint for vehicle systems.
+ * =============================================================================
+ *  CarmodfourMod — Core mod entrypoint for vehicle systems.
+ * =============================================================================
  *
  * Handles:
- *  - Registry initialization
- *  - GeckoLib startup
- *  - Network packet registration
- *  - Server work queue
+ *   ✓ Registry initialization
+ *   ✓ GeckoLib startup
+ *   ✓ Network packet registration
+ *   ✓ Server work queue (MCreator-style)
+ * =============================================================================
  */
 @Mod(CarmodfourMod.MODID)
 public class CarmodfourMod {
@@ -80,6 +84,7 @@ public class CarmodfourMod {
     // PACKET REGISTRATION
     // -------------------------------------------------------------------------
     private void registerPackets() {
+
         // ---------------------------------------------------------------------
         // Drive state changes (PARK/DRIVE/REVERSE)
         // ---------------------------------------------------------------------
@@ -112,7 +117,7 @@ public class CarmodfourMod {
         );
 
         // ---------------------------------------------------------------------
-        // ✅ NEW Headlight flash packet
+        // ✅ Headlight flash packet
         // Triggers client-side overlay flash when locking/unlocking or door toggle
         // ---------------------------------------------------------------------
         addNetworkMessage(
@@ -120,6 +125,17 @@ public class CarmodfourMod {
                 HeadlightFlashPacket::encode,
                 HeadlightFlashPacket::decode,
                 HeadlightFlashPacket::handle
+        );
+
+        // ---------------------------------------------------------------------
+        // ✅ NEW Headlight brightness packet
+        // Cycles the car’s headlight brightness (L0 → L1 → L2 → L3 → L0)
+        // ---------------------------------------------------------------------
+        addNetworkMessage(
+                HeadlightBrightnessPacket.class,
+                HeadlightBrightnessPacket::encode,
+                HeadlightBrightnessPacket::decode,
+                HeadlightBrightnessPacket::handle
         );
 
         LOGGER.info("[Carmodfour] Network packets registered successfully!");
@@ -140,7 +156,8 @@ public class CarmodfourMod {
     // -------------------------------------------------------------------------
     // SERVER WORK QUEUE (standard MCreator behavior)
     // -------------------------------------------------------------------------
-    private static final ConcurrentLinkedQueue<AbstractMap.SimpleEntry<Runnable, Integer>> workQueue = new ConcurrentLinkedQueue<>();
+    private static final ConcurrentLinkedQueue<AbstractMap.SimpleEntry<Runnable, Integer>> workQueue =
+            new ConcurrentLinkedQueue<>();
 
     public static void queueServerWork(int tickDelay, Runnable action) {
         workQueue.add(new AbstractMap.SimpleEntry<>(action, tickDelay));

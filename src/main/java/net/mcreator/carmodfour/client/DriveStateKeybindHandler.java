@@ -3,6 +3,7 @@ package net.mcreator.carmodfour.client;
 import net.mcreator.carmodfour.CarmodfourMod;
 import net.mcreator.carmodfour.network.DriveStateChangePacket;
 import net.mcreator.carmodfour.network.BrakeControlPacket;
+import net.mcreator.carmodfour.network.HeadlightBrightnessPacket; // 🔹 NEW PACKET IMPORT
 import net.mcreator.carmodfour.entity.CardemoEntity;
 
 import net.minecraft.client.KeyMapping;
@@ -40,6 +41,10 @@ public class DriveStateKeybindHandler {
     public static final KeyMapping RIGHT_SIGNAL_KEY = new KeyMapping(
             "key.carmodfour.signal_right", GLFW.GLFW_KEY_RIGHT, "key.categories.carmodfour");
 
+    // 🔹 NEW: Headlight cycle keybind
+    public static final KeyMapping HEADLIGHT_KEY = new KeyMapping(
+            "key.carmodfour.headlight_cycle", GLFW.GLFW_KEY_L, "key.categories.carmodfour");
+
     @SubscribeEvent
     public static void registerKeys(RegisterKeyMappingsEvent event) {
         event.register(CYCLE_DRIVE_KEY);
@@ -48,6 +53,7 @@ public class DriveStateKeybindHandler {
         event.register(DRIVE_DOWN_KEY);
         event.register(LEFT_SIGNAL_KEY);
         event.register(RIGHT_SIGNAL_KEY);
+        event.register(HEADLIGHT_KEY); // 🔹 Register new L key
     }
 
     // -------------------------------------------------------------------------
@@ -64,7 +70,7 @@ public class DriveStateKeybindHandler {
     private static float brakeIntensity = 0.0f;
 
     // -------------------------------------------------------------------------
-    // INPUT HANDLER — shifts, signals, brakes
+    // INPUT HANDLER — shifts, signals, brakes, headlights
     // -------------------------------------------------------------------------
     @SubscribeEvent
     public static void onKeyInput(InputEvent.Key event) {
@@ -131,12 +137,21 @@ public class DriveStateKeybindHandler {
             }
         }
 
+        // --- Headlight cycle (L key) ---
+        if (isDriving && HEADLIGHT_KEY.consumeClick()) {
+            // Send packet to server to cycle brightness
+            CarmodfourMod.PACKET_HANDLER.sendToServer(new HeadlightBrightnessPacket(car.getId()));
+
+            // Small local click sound for feedback
+            player.level.playLocalSound(car.getX(), car.getY(), car.getZ(),
+                    SoundEvents.LEVER_CLICK, SoundSource.PLAYERS, 0.5f, 1.15f, false);
+        }
+
         // --- Brake key: send to server on PRESS and RELEASE ---
         if (event.getKey() == GLFW.GLFW_KEY_S) {
             boolean nowBraking = (event.getAction() != GLFW.GLFW_RELEASE);
             braking = nowBraking; // local visual
             if (isDriving) {
-                // authoritative change on server; also cancels accelerating there
                 CarmodfourMod.PACKET_HANDLER.sendToServer(new BrakeControlPacket(car.getId(), nowBraking));
             }
         }
@@ -210,5 +225,4 @@ public class DriveStateKeybindHandler {
         signalTick = 0;
         signalVisible = true;
     }
-
 }
