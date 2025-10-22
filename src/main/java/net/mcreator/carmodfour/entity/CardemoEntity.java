@@ -426,8 +426,14 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
     public void setEngineOn(boolean value) {
         setState(value ? VehicleState.ENGINE_ON : VehicleState.ENGINE_OFF);
-        // --- Auto-off headlights when engine stops ---
-        if (!value) {
+
+        if (value) {
+            // ✅ Auto-on mid headlights when engine starts
+            if (getHeadlightMode() == 0) {
+                setHeadlightMode(2);
+            }
+        } else {
+            // ✅ Auto-off headlights when engine stops
             setHeadlightMode(0);
         }
     }
