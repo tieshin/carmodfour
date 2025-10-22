@@ -317,7 +317,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
     private void clearHeadlightBlocksAround(net.minecraft.server.level.ServerLevel server, Block headlightBlock) {
         if (headlightBlock == null) return;
 
-        int radius = 8;
+        int radius = 16;
         BlockPos base = this.blockPosition();
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dy = -2; dy <= 2; dy++) {
@@ -676,6 +676,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
                 // --- NEW: Update invisible light blocks for headlights ---
                 updateHeadlightBlocks();
+
 
             } else {
                 // --- NEW: Engine OFF → clear remaining headlight blocks ---

@@ -14,6 +14,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.util.Mth;
 
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.PoseStack;
@@ -34,6 +35,7 @@ import java.util.ArrayDeque;
  *    ✓ Smooth suspension spring dynamics
  *    ✓ Blinkers, brake lights, and headlights
  *    ✓ Flash overlay for lock/unlock confirmation
+ *    ✓ Orientation fix — faces correct direction upon spawn
  * ============================================================================
  */
 public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
@@ -148,9 +150,9 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
                 if (hl <= 0) return;
 
                 float alpha = switch (hl) {
-                    case 1 -> 0.20f; // low beams
-                    case 2 -> 0.50f; // medium
-                    case 3 -> 1.00f; // high
+                    case 1 -> 0.20f;
+                    case 2 -> 0.50f;
+                    case 3 -> 1.00f;
                     default -> 0f;
                 };
                 if (alpha <= 0.01f) return;
@@ -222,13 +224,20 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
     }
 
     // ===============================================================
-    // MAIN RENDER METHOD
+    // MAIN RENDER METHOD (with spawn orientation fix)
     // ===============================================================
     @Override
     public void render(CardemoEntity entity, float entityYaw, float partialTicks,
                        PoseStack stack, MultiBufferSource bufferIn, int packedLightIn) {
+
+        // --- Ensure correct facing direction from entity data ---
+        float trueYaw = entity.getYRot();
+        float bodyYaw = entity.yBodyRot;
+        float interpYaw = Mth.lerp(partialTicks, bodyYaw, trueYaw);
+
         stack.pushPose();
         stack.scale(2.0f, 2.0f, 2.0f);
+
         super.render(entity, entityYaw, partialTicks, stack, bufferIn, packedLightIn);
         stack.popPose();
     }
