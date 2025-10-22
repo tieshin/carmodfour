@@ -172,8 +172,8 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
 
     // ==========================================================================
-// HEADLIGHT BEAM LIGHT BLOCK HANDLER (MOVING BEAM + AUTO CLEANUP + INSTANT OFF)
-// ==========================================================================
+    // HEADLIGHT BEAM LIGHT BLOCK HANDLER (MOVING BEAM + AUTO CLEANUP + INSTANT OFF)
+    // ==========================================================================
     private void updateHeadlightBlocks() {
         if (this.level.isClientSide || !(this.level instanceof net.minecraft.server.level.ServerLevel server))
             return;
@@ -528,6 +528,32 @@ public class CardemoEntity extends Mob implements IAnimatable {
     @Override
     public void tick() {
         super.tick();
+
+        // ---------------------------------------------------------------------
+        // 🧍 Prevent steering drift when no rider is present
+        // ---------------------------------------------------------------------
+        if (this.getPassengers().isEmpty()) {
+            // 🚫 Reset all input flags so the car doesn't keep turning after dismount
+            this.accelerating = false;
+            this.braking = false;
+            this.turningLeft = false;
+            this.turningRight = false;
+
+            // 🌀 Gradually reduce any residual rotation so it stops spinning smoothly
+            if (Math.abs(this.currentTurnRate) > 0.01f) {
+                this.currentTurnRate *= 0.85f; // damp turning over time
+                this.setYRot(this.getYRot() + currentTurnRate);
+            } else {
+                this.currentTurnRate = 0f;
+            }
+
+            // 🚗 Apply light drag to gradually slow forward momentum while empty
+            if (this.currentSpeed > 0) {
+                this.currentSpeed *= 0.98;
+                if (this.currentSpeed < 0.001) this.currentSpeed = 0;
+            }
+        }
+        // ---------------------------------------------------------------------
 
         // ---------------------------------------------------------------------
         // 🔄 Cooldowns & recoil
