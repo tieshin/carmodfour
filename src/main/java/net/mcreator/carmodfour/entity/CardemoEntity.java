@@ -1173,6 +1173,22 @@ public class CardemoEntity extends Mob implements IAnimatable {
                 continue;
             }
 
+            // --- Solid-with-solid-above check (2-block-tall wall / overhang) ---
+            if (solid && !airAbove) {
+                BlockPos secondAbove = abovePos.above();
+                boolean twoSolidStack = !level.getBlockState(abovePos).isAir()
+                        && !level.getBlockState(secondAbove).isAir();
+                if (twoSolidStack) {
+                    dlog(DBG_BUMP_LOGS, String.format(
+                            "BUMP (%s): solid 2-block stack at %s",
+                            reverse ? "rear" : "front", basePos
+                    ));
+                    return true;
+                }
+            }
+
+
+
             if (rise > 0) {
                 totalRise += rise;
 
@@ -1213,9 +1229,9 @@ public class CardemoEntity extends Mob implements IAnimatable {
             lastY = avgY;
         }
 
-        // ----------------------------------------------------------------------
-        // (B) Wall/solid check (same as before)
-        // ----------------------------------------------------------------------
+// ----------------------------------------------------------------------
+// (B) Wall/solid check (same as before)
+// ----------------------------------------------------------------------
         final double[] lateral = { 0.0, +0.35, -0.35 };
         final double[] heights = { 0.6, 1.2 };
         Vec3 right = new Vec3(Math.cos(yawRad), 0, Math.sin(yawRad));
@@ -1244,6 +1260,25 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
                     double hitY = hit.getLocation().y;
                     double riseFromGround = hitY - hereY;
+
+                    // --- NEW (minimal): trigger on any 2-block vertical solid stack ---
+                    // Use collision shapes (more accurate than isAir for slabs/stairs/fluids).
+                    boolean solidHere  = !state.getCollisionShape(level, pos).isEmpty();
+                    boolean solidAbove = !level.getBlockState(pos.above())
+                            .getCollisionShape(level, pos.above()).isEmpty();
+                    boolean solidBelow = !level.getBlockState(pos.below())
+                            .getCollisionShape(level, pos.below()).isEmpty();
+
+                    // If we hit the lower block of a 2-high stack (solidHere && solidAbove),
+                    // OR we hit the upper block (solidBelow && solidHere), it's a true wall/overhang.
+                    if ((solidHere && solidAbove) || (solidBelow && solidHere)) {
+                        dlog(DBG_BUMP_LOGS, String.format(
+                                "BUMP (%s): 2-block vertical solid stack at %s (h=%.2f rise=%.2f)",
+                                reverse ? "rear" : "front", pos, h, riseFromGround));
+                        return true;
+                    }
+
+                    // Existing tall/steep check remains for single massive rises.
                     if (riseFromGround > climbCap) {
                         dlog(DBG_BUMP_LOGS, String.format(
                                 "BUMP (%s): wall rise=%.2f > climbCap=%.2f at %s",
