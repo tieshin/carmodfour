@@ -529,6 +529,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
     public void tick() {
         super.tick();
 
+
         // ---------------------------------------------------------------------
         // 🧍 Prevent steering drift when no rider is present
         // ---------------------------------------------------------------------
@@ -617,10 +618,11 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
 
     // --------------------------------------------------------------------------
-// CLIENT-SIDE HOTBAR OVERLAY (Speed / Drive / HP / Horn / Turn Signals)
-// --------------------------------------------------------------------------
+    // CLIENT-SIDE HOTBAR OVERLAY (Speed / Drive / HP / Horn / Turn Signals)
+    // --------------------------------------------------------------------------
     @OnlyIn(Dist.CLIENT)
     private void updateClientSpeedOverlay() {
+        // --- Standard speed overlay logic ---
         Vec3 now = this.position();
         if (clientPrevPos == null) clientPrevPos = now;
         else {
@@ -655,48 +657,35 @@ public class CardemoEntity extends Mob implements IAnimatable {
             boolean hornDown = net.mcreator.carmodfour.client.DriveStateKeybindHandler.HORN_KEY.isDown();
             String horn = hornDown ? "§cH§r" : "H";
 
-// --- Turn signal indicators (gray when off or between flashes) ---
+            // --- Turn signal indicators ---
             boolean leftActive  = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isLeftSignalOn();
             boolean rightActive = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isRightSignalOn();
             boolean leftVisible  = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isLeftSignalVisible();
             boolean rightVisible = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isRightSignalVisible();
 
-            String leftArrow;
-            if (leftActive) {
-                // Active: blink between yellow and gray
-                leftArrow = leftVisible ? "§e<§r" : "§7<§r";  // §e = yellow, §7 = gray
-            } else {
-                // Not active: solid gray
-                leftArrow = "§7<§r";
-            }
+            String leftArrow  = leftActive  ? (leftVisible  ? "§e<§r" : "§7<§r") : "§7<§r";
+            String rightArrow = rightActive ? (rightVisible ? "§e>§r" : "§7>§r") : "§7>§r";
 
-            String rightArrow;
-            if (rightActive) {
-                rightArrow = rightVisible ? "§e>§r" : "§7>§r";
-            } else {
-                rightArrow = "§7>§r";
-            }
-
-// --- NEW: Headlight indicator (single-hue fading yellow) ---
+            // --- Headlight indicator ---
             int hl = getHeadlightMode();
             MutableComponent hlSymbol = switch (hl) {
-                case 1 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0x9A9A4A))); // Low - dull faded yellow-gray
-                case 2 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0xE6C34A))); // Medium - warm pale yellow
-                case 3 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0xFFF76B))); // High - bright yellow-white
-                default -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0x444444))); // Off - dim gray
+                case 1 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0x9A9A4A)));
+                case 2 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0xE6C34A)));
+                case 3 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0xFFF76B)));
+                default -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0x444444)));
             };
 
-// --- Build the overlay as a Component ---
+            // --- Build and display overlay ---
             MutableComponent overlay = Component.literal(
                             String.format("%s || %s || | %s | %s | %s |  ||  %.1f b/s  ||  HP : %s%d§r / %d || ",
-                                    leftArrow, horn, p, d, r, speed, colorCode, hpInt, maxInt)
-                    ).append(hlSymbol)
+                                    leftArrow, horn, p, d, r, speed, colorCode, hpInt, maxInt))
+                    .append(hlSymbol)
                     .append(Component.literal(String.format(" || %s", rightArrow)));
 
-// --- Display overlay (above hotbar) ---
             mc.gui.setOverlayMessage(overlay, false);
         }
     }
+
 
     private void handleEntityCollisions() {
         if (currentSpeed <= 0.01) return;
@@ -1379,6 +1368,40 @@ public class CardemoEntity extends Mob implements IAnimatable {
             passenger.setPos(targetPos.x, targetPos.y, targetPos.z);
         }
     }
+
+    // ==========================================================================
+// SIMPLE PLAYER DISMOUNT — ejects to the TRUE LEFT side of the car
+// ==========================================================================
+    @Override
+    public Vec3 getDismountLocationForPassenger(LivingEntity passenger) {
+        // --- Determine left/right vectors based on Minecraft yaw (clockwise-positive)
+        double yawRad = Math.toRadians(this.getYRot());
+
+        // ✅ To get LEFT: rotate forward vector +90° (instead of -90°)
+        // Forward = (-sin(yaw), 0, cos(yaw))
+        // Left    = (-cos(yaw), 0, -sin(yaw))
+        Vec3 left = new Vec3(-Math.cos(yawRad), 0, -Math.sin(yawRad)).normalize();
+
+        // --- Step 1: Preferred dismount offset (1.8 blocks to the left)
+        Vec3 base = this.position().add(left.scale(1.8));
+
+        // --- Step 2: Find a safe dismount spot near that base
+        BlockPos bp = new BlockPos(base.x, Math.floor(this.getY()), base.z);
+        Vec3 safe = net.minecraft.world.entity.vehicle.DismountHelper.findSafeDismountLocation(
+                passenger.getType(), this.level, bp, true
+        );
+
+        if (safe != null) {
+            // Small upward nudge to avoid clipping into ground or wheel arches
+            return safe.add(0.0, 0.15, 0.0);
+        }
+
+        // --- Step 3: Fallback — if no valid spot, force left offset beside vehicle
+        // This ensures consistent left-side ejection even in tight spaces
+        return new Vec3(base.x, this.getY() + 0.15, base.z);
+    }
+
+
 
     // ==========================================================================
     // PLAYER INTERACTION (LOCK/DOOR/ENTER)
