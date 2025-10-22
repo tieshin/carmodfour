@@ -25,6 +25,7 @@ package net.mcreator.carmodfour.entity;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.Explosion;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import software.bernie.geckolib3.util.GeckoLibUtil;
@@ -536,6 +537,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         super.tick();
 
 
+
         // ---------------------------------------------------------------------
         // 🧍 Prevent steering drift when no rider is present
         // ---------------------------------------------------------------------
@@ -567,11 +569,99 @@ public class CardemoEntity extends Mob implements IAnimatable {
         // ---------------------------------------------------------------------
         if (recoilCooldown > 0) recoilCooldown--;
 
-        // ---------------------------------------------------------------------
-        // 🧠 SERVER-SIDE LOGIC — movement, collisions, headlights
-        // ---------------------------------------------------------------------
+// ---------------------------------------------------------------------
+// 🧠 SERVER-SIDE LOGIC — movement, collisions, headlights
+// ---------------------------------------------------------------------
         if (!level.isClientSide) {
             boolean engineOn = isEngineOn();
+
+            // 🔥 Emit fire effects when HP is low (discrete scaling by health)
+            float hpRatio = this.getHealth() / this.getMaxHealth();
+            if (hpRatio <= 0.6f) { // 60% or less = damaged engine zone
+                double yawRad = Math.toRadians(this.getYRot());
+
+                // Front of the car — slightly forward and upward (hood area)
+                Vec3 frontPos = this.position()
+                        .add(-Math.sin(yawRad) * 1.8, 0.8, Math.cos(yawRad) * 1.8);
+
+                long gt = this.level.getGameTime();
+
+                // 🔊 FIRE CRACKLE — faster and louder as damage increases
+                long soundInterval;
+                if (hpRatio > 0.4f) soundInterval = 40L;
+                else if (hpRatio > 0.3f) soundInterval = 30L;
+                else if (hpRatio > 0.2f) soundInterval = 20L;
+                else if (hpRatio > 0.1f) soundInterval = 12L;
+                else soundInterval = 8L;
+
+                float severity = 1.0f - hpRatio; // 0.0 → 1.0 scale (healthy → dying)
+                float fireVol = 0.35f + (0.85f * severity); // 0.35–1.2
+                float firePitch = 0.95f + (0.15f * this.random.nextFloat() * severity); // subtle variation
+
+                if (gt % soundInterval == 0L) {
+                    this.level.playSound(
+                            null,
+                            frontPos.x, frontPos.y, frontPos.z,
+                            SoundEvents.FIRE_AMBIENT,
+                            SoundSource.BLOCKS,
+                            fireVol,
+                            firePitch
+                    );
+                }
+
+                // 💨 SMOKE FREQUENCY BY HEALTH
+                long smokeInterval;
+                if (hpRatio > 0.4f)      smokeInterval = 60L;   // 3s
+                else if (hpRatio > 0.3f) smokeInterval = 40L;   // 2s
+                else if (hpRatio > 0.2f) smokeInterval = 20L;   // 1s
+                else if (hpRatio > 0.1f) smokeInterval = 12L;   // 0.6s
+                else                     smokeInterval = 6L;    // 0.3s
+
+                if (gt % smokeInterval == 0L && this.level instanceof net.minecraft.server.level.ServerLevel server) {
+                    int count = (int) (2 + (8 * severity));
+                    double spread = 0.1 + (0.15 * severity);
+                    double speed = 0.015 + (0.02 * severity);
+
+                    // Main smoke
+                    server.sendParticles(
+                            ParticleTypes.CAMPFIRE_COSY_SMOKE,
+                            frontPos.x, frontPos.y, frontPos.z,
+                            count,
+                            spread, spread / 2, spread,
+                            speed
+                    );
+
+                    // 💨+💨 Extra dust / ash when HP below 15%
+                    if (hpRatio <= 0.15f) {
+                        int dustCount = (int) (6 + (8 * severity));
+                        double dustSpread = 0.25 + (0.1 * severity);
+                        double dustSpeed = 0.01 + (0.015 * severity);
+
+                        server.sendParticles(
+                                ParticleTypes.ASH,
+                                frontPos.x, frontPos.y - 0.2, frontPos.z,
+                                dustCount,
+                                dustSpread, 0.2, dustSpread,
+                                dustSpeed
+                        );
+                    }
+                }
+
+                // 💣 TNT HISS — every 1.5s when HP < 15%, scales with severity
+                if (hpRatio <= 0.15f && gt % 30L == 0L) {
+                    float hissVol = 0.5f + (1.2f * severity); // up to ~1.7 at critical HP
+                    float hissPitch = 1.0f + (0.3f * severity); // higher pitch as it worsens
+
+                    this.level.playSound(
+                            null,
+                            frontPos.x, frontPos.y, frontPos.z,
+                            SoundEvents.TNT_PRIMED,
+                            SoundSource.BLOCKS,
+                            hissVol,
+                            hissPitch
+                    );
+                }
+            }
 
             if (engineOn) {
                 // --- Handle driving physics ---
@@ -905,28 +995,94 @@ public class CardemoEntity extends Mob implements IAnimatable {
     }
 
     // --------------------------------------------------------------------------
-    // die() override — guarantees despawn for any lethal event
+    // die() override — cinematic explosion with enhanced knockback (Forge 1.19.2)
     // --------------------------------------------------------------------------
     @Override
     public void die(DamageSource cause) {
         super.die(cause); // run vanilla event chain first
 
         if (!this.level.isClientSide && !this.isRemoved()) {
-            // Small visual & audio flourish
+            double x = this.getX();
+            double y = this.getY() + 0.5;
+            double z = this.getZ();
+
+            // 💥 Explosion parameters
+            float explosionPower = 3.5f;  // TNT-level blast radius
+            boolean causesFire = true;
+            Explosion.BlockInteraction blockInteraction = Explosion.BlockInteraction.BREAK;
+
+            // 💣 Play TNT explosion sound
+            this.level.playSound(
+                    null,
+                    x, y, z,
+                    SoundEvents.GENERIC_EXPLODE,
+                    SoundSource.BLOCKS,
+                    1.8f,
+                    1.0f + (this.random.nextFloat() * 0.2f - 0.1f)
+            );
+
+            // 💨 Pre-burst visuals
             if (this.level instanceof net.minecraft.server.level.ServerLevel server) {
-                for (int i = 0; i < 12; i++) {
-                    double ox = (this.random.nextDouble() - 0.5) * 1.5;
-                    double oy = this.random.nextDouble() * 0.8;
-                    double oz = (this.random.nextDouble() - 0.5) * 1.5;
-                    server.sendParticles(ParticleTypes.SMOKE,
-                            this.getX() + ox, this.getY() + oy, this.getZ() + oz,
-                            1, 0, 0, 0, 0.01);
+                for (int i = 0; i < 25; i++) {
+                    double ox = (this.random.nextDouble() - 0.5) * 2.0;
+                    double oy = this.random.nextDouble() * 1.2;
+                    double oz = (this.random.nextDouble() - 0.5) * 2.0;
+
+                    server.sendParticles(ParticleTypes.LARGE_SMOKE, x + ox, y + oy, z + oz, 1, 0, 0, 0, 0.02);
+                    server.sendParticles(ParticleTypes.FLAME,       x + ox * 0.4, y + oy * 0.4, z + oz * 0.4, 1, 0, 0, 0, 0.04);
+                    server.sendParticles(ParticleTypes.ASH,         x + ox * 0.3, y + oy * 0.3, z + oz * 0.3, 1, 0, 0, 0, 0.02);
                 }
             }
-            this.level.playSound(null, this.blockPosition(),
-                    SoundEvents.ANVIL_BREAK, SoundSource.BLOCKS, 0.8f, 0.85f);
 
-            // 🔹 Final guaranteed removal
+            // 💥 Create explosion (Forge 1.19.2 signature)
+            this.level.explode(
+                    this,                 // source entity
+                    x, y, z,              // explosion position
+                    explosionPower,       // strength
+                    causesFire,           // whether to ignite blocks
+                    blockInteraction      // block destruction mode
+            );
+
+            // 🌪️ Apply enhanced manual knockback pulse
+            double radius = 8.0; // affect radius (larger than explosion)
+            double force  = 3.0; // base force multiplier (3× stronger)
+
+            java.util.List<Entity> nearby = this.level.getEntities(this,
+                    new net.minecraft.world.phys.AABB(
+                            x - radius, y - radius, z - radius,
+                            x + radius, y + radius, z + radius));
+
+            for (Entity e : nearby) {
+                if (e == this || e.isSpectator()) continue;
+
+                // Skip creative players
+                if (e instanceof Player p && (p.isCreative() || p.isSpectator()))
+                    continue;
+
+                Vec3 dir = e.position().subtract(x, y, z);
+                double dist = Math.max(0.1, dir.length());
+                dir = dir.normalize();
+
+                // Exponentially decay with distance
+                double strength = (1.0 - (dist / radius)) * force;
+                Vec3 knock = dir.scale(strength);
+                e.push(knock.x, knock.y + 0.5, knock.z);
+                e.hurtMarked = true; // ensure it applies visually
+            }
+
+            // 🔥 Post-explosion smoke burst
+            if (this.level instanceof net.minecraft.server.level.ServerLevel server) {
+                for (int i = 0; i < 30; i++) {
+                    double ox = (this.random.nextDouble() - 0.5) * 3.0;
+                    double oy = this.random.nextDouble() * 2.0;
+                    double oz = (this.random.nextDouble() - 0.5) * 3.0;
+                    server.sendParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE,
+                            x + ox, y + oy, z + oz,
+                            1, 0, 0, 0, 0.04);
+                }
+            }
+
+            // 🧹 Final guaranteed removal
             this.discard();
         }
     }
@@ -1185,9 +1341,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
 // END BUMP / RECOIL IMPLEMENTATION — death-safe
 // ==========================================================================
 
-
-
-
     // ==========================================================================
     // TILT CALCULATION (PITCH + ROLL COMBINED)
     // ==========================================================================
@@ -1376,8 +1529,8 @@ public class CardemoEntity extends Mob implements IAnimatable {
     }
 
     // ==========================================================================
-// SIMPLE PLAYER DISMOUNT — ejects to the TRUE LEFT side of the car
-// ==========================================================================
+    // SIMPLE PLAYER DISMOUNT — ejects to the TRUE LEFT side of the car
+    // ==========================================================================
     @Override
     public Vec3 getDismountLocationForPassenger(LivingEntity passenger) {
         // --- Determine left/right vectors based on Minecraft yaw (clockwise-positive)
@@ -1406,8 +1559,6 @@ public class CardemoEntity extends Mob implements IAnimatable {
         // This ensures consistent left-side ejection even in tight spaces
         return new Vec3(base.x, this.getY() + 0.15, base.z);
     }
-
-
 
     // ==========================================================================
     // PLAYER INTERACTION (LOCK/DOOR/ENTER)
@@ -1582,6 +1733,16 @@ public class CardemoEntity extends Mob implements IAnimatable {
             // Reset the client-visible indicators
             net.mcreator.carmodfour.client.DriveStateKeybindHandler.resetSignalsClient();
         }
+    }
+
+    @Override
+    protected net.minecraft.sounds.SoundEvent getHurtSound(DamageSource damageSource) {
+        return SoundEvents.CHAIN_BREAK;
+    }
+
+    @Override
+    protected net.minecraft.sounds.SoundEvent getDeathSound() {
+        return SoundEvents.GENERIC_EXPLODE;
     }
 
     // ==========================================================================
