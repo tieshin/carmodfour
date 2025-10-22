@@ -1383,7 +1383,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         Vec3 left = new Vec3(-Math.cos(yawRad), 0, -Math.sin(yawRad)).normalize();
 
         // --- Step 1: Preferred dismount offset (1.8 blocks to the left)
-        Vec3 base = this.position().add(left.scale(1.8));
+        Vec3 base = this.position().add(left.scale(-1.8));
 
         // --- Step 2: Find a safe dismount spot near that base
         BlockPos bp = new BlockPos(base.x, Math.floor(this.getY()), base.z);
