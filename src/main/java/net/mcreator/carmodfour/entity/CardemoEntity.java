@@ -850,6 +850,8 @@ public class CardemoEntity extends Mob implements IAnimatable {
         this.setYRot(this.getYRot() + currentTurnRate);
         double yawRad = Math.toRadians(this.getYRot());
 
+
+
 // ---------------------------------------------------------------------
 // 🧩 BUMP DETECTION (velocity-scaled HP loss + anvil sound intensity)
 // ---------------------------------------------------------------------
@@ -1166,6 +1168,19 @@ public class CardemoEntity extends Mob implements IAnimatable {
             boolean solid = !baseState.isAir() && baseState.getMaterial().isSolid();
             boolean airAbove = aboveState.isAir();
 
+            // --- NEW: Air-with-solid-above logic (detect overhangs / columns) ---
+            if (baseState.isAir() && !aboveState.isAir() &&
+                    aboveState.getMaterial().isSolid() &&
+                    !aboveState.getCollisionShape(level, abovePos).isEmpty()) {
+
+                // this means there's an air gap with a solid directly above it
+                dlog(DBG_BUMP_LOGS, String.format(
+                        "BUMP (%s): air below solid at %s (overhang/column detected)",
+                        reverse ? "rear" : "front", abovePos
+                ));
+                return true;
+            }
+
             if (solid && airAbove && rise <= (1.0 + 0.15)) {
                 // treat this as a step we can mount
                 lastY = basePos.getY() + 1.0;
@@ -1288,6 +1303,25 @@ public class CardemoEntity extends Mob implements IAnimatable {
                         return true;
                     }
                 }
+            }
+        }
+
+        {
+            Vec3 start = this.position().add(0, 1.2, 0);  // about roof level
+            Vec3 end   = start.add(this.getForward().scale(3.0)); // 3 m straight ahead
+
+            var ctx = new ClipContext(start, end,
+                    ClipContext.Block.COLLIDER,
+                    ClipContext.Fluid.NONE,
+                    this);
+
+            var hit = level.clip(ctx);
+
+            if (hit != null && hit.getType() == HitResult.Type.BLOCK) {
+                BlockHitResult bhr = (BlockHitResult) hit;
+                dlog(true, "Hit: " + bhr.getBlockPos() + "  " + level.getBlockState(bhr.getBlockPos()).getBlock());
+            } else {
+                dlog(true, "No hit at all from " + start + " → " + end);
             }
         }
 
@@ -1477,23 +1511,51 @@ public class CardemoEntity extends Mob implements IAnimatable {
     }
 
     /**
-     * Ceiling-safe ground height finder to avoid sampling tunnel/bridge ceilings.
+     * Bidirectional ground sampler that can detect the highest solid surface
+     * beneath a given point — works for stairs, slabs, floating blocks, and columns.
      */
     private double getGroundY(Vec3 pos) {
-        int startY = (int) Math.floor(pos.y);
-        int minY   = level.getMinBuildHeight();
+        BlockPos base = new BlockPos(
+                net.minecraft.util.Mth.floor(pos.x),
+                net.minecraft.util.Mth.floor(pos.y),
+                net.minecraft.util.Mth.floor(pos.z)
+        );
 
-        for (int y = startY; y >= startY - 8 && y >= minY; y--) {
-            BlockPos check = new BlockPos((int) Math.floor(pos.x), y, (int) Math.floor(pos.z));
-            if (!level.getBlockState(check).isAir()) {
-                // First solid block found; ground is its top face
-                return y + 1.0;
+        int worldMin = level.getMinBuildHeight();
+        int worldMax = level.getMaxBuildHeight();
+
+        double groundY = Double.NEGATIVE_INFINITY;
+
+        // --- (1) Scan downward from current Y to find topmost solid ---
+        for (int y = base.getY(); y >= worldMin && y >= base.getY() - 6; y--) {
+            BlockPos down = new BlockPos(base.getX(), y, base.getZ());
+            BlockState st = level.getBlockState(down);
+
+            if (!st.isAir() && !st.getCollisionShape(level, down).isEmpty()) {
+                double top = y + st.getCollisionShape(level, down).max(net.minecraft.core.Direction.Axis.Y);
+                groundY = Math.max(groundY, top);
+                break;
             }
         }
 
-        // Heightmap fallback
-        return level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
-                (int) Math.floor(pos.x), (int) Math.floor(pos.z));
+        // --- (2) Scan upward (air-down) to handle floating slabs or steps above air ---
+        for (int y = base.getY() + 1; y <= worldMax && y <= base.getY() + 4; y++) {
+            BlockPos up = new BlockPos(base.getX(), y, base.getZ());
+            BlockState st = level.getBlockState(up);
+
+            if (!st.isAir() && !st.getCollisionShape(level, up).isEmpty()) {
+                double top = y + st.getCollisionShape(level, up).max(net.minecraft.core.Direction.Axis.Y);
+                groundY = Math.max(groundY, top);
+                break;
+            }
+        }
+
+        // --- (3) Fallback: heightmap if nothing solid found ---
+        if (groundY == Double.NEGATIVE_INFINITY) {
+            groundY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, base.getX(), base.getZ());
+        }
+
+        return groundY;
     }
 
     // ==========================================================================
@@ -1596,21 +1658,84 @@ public class CardemoEntity extends Mob implements IAnimatable {
         return new Vec3(base.x, this.getY() + 0.15, base.z);
     }
 
-    // ==========================================================================
-    // PLAYER INTERACTION (LOCK/DOOR/ENTER)
-    // ==========================================================================
+// ==========================================================================
+// PLAYER INTERACTION (LOCK / DOOR / ENTER / REPAIR)
+// ==========================================================================
 
     @Override
     public InteractionResult mobInteract(Player player, InteractionHand hand) {
         boolean sneaking = player.isShiftKeyDown();
         boolean client   = this.level.isClientSide;
 
+        // ----------------------------------------------------------------------
+        // 🛠️ REPAIR FEATURE — Right-click with Iron Ingot to restore 5 HP
+        // ----------------------------------------------------------------------
+        if (!client) {
+            var stack = player.getItemInHand(hand);
+
+            if (stack.getItem() == net.minecraft.world.item.Items.IRON_INGOT) {
+                float currentHP = this.getHealth();
+                float maxHP = this.getMaxHealth();
+
+                if (currentHP < maxHP) {
+                    float healAmount = Math.min(5.0f, maxHP - currentHP);
+                    this.heal(healAmount);
+
+                    // Consume one ingot (unless in Creative mode)
+                    if (!player.getAbilities().instabuild) {
+                        stack.shrink(1);
+                    }
+
+                    // Play repair sound + particles
+                    this.level.playSound(
+                            null,
+                            this.blockPosition(),
+                            net.minecraft.sounds.SoundEvents.ANVIL_USE,
+                            net.minecraft.sounds.SoundSource.BLOCKS,
+                            0.8f,
+                            1.1f
+                    );
+
+                    if (this.level instanceof net.minecraft.server.level.ServerLevel server) {
+                        server.sendParticles(
+                                net.minecraft.core.particles.ParticleTypes.CRIT,
+                                this.getX(), this.getY() + 1.0, this.getZ(),
+                                10,
+                                0.3, 0.3, 0.3,
+                                0.1
+                        );
+                    }
+
+                    // Notify the player
+                    player.displayClientMessage(
+                            net.minecraft.network.chat.Component.literal(
+                                    "§aRepaired car: +" + (int) healAmount + " HP (" +
+                                            (int) this.getHealth() + "/" + (int) this.getMaxHealth() + ")"
+                            ), true
+                    );
+
+                    return InteractionResult.SUCCESS;
+                } else {
+                    player.displayClientMessage(
+                            net.minecraft.network.chat.Component.literal("§eCar is already at full health."),
+                            true
+                    );
+                    return InteractionResult.FAIL;
+                }
+            }
+        }
+
+        // ----------------------------------------------------------------------
+        // 🚗 EXISTING DOOR / LOCK / ENTER LOGIC
+        // ----------------------------------------------------------------------
         if (sneaking) {
             if (!client) {
                 if (isLocked()) {
-                    player.displayClientMessage(net.minecraft.network.chat.Component.literal("Car is locked."), true);
+                    player.displayClientMessage(
+                            net.minecraft.network.chat.Component.literal("Car is locked."), true);
                     return InteractionResult.FAIL;
                 }
+
                 if (isDoorOpen()) {
                     playDoorSound(false, player);
                     setAnimation("r_door_close");
@@ -1626,11 +1751,13 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
         if (!client) {
             if (isLocked()) {
-                player.displayClientMessage(net.minecraft.network.chat.Component.literal("Car is locked."), true);
+                player.displayClientMessage(
+                        net.minecraft.network.chat.Component.literal("Car is locked."), true);
                 return InteractionResult.FAIL;
             }
             if (!isDoorOpen()) {
-                player.displayClientMessage(net.minecraft.network.chat.Component.literal("Door is shut."), true);
+                player.displayClientMessage(
+                        net.minecraft.network.chat.Component.literal("Door is shut."), true);
                 return InteractionResult.FAIL;
             }
             if (this.getPassengers().isEmpty()) {
@@ -1644,10 +1771,13 @@ public class CardemoEntity extends Mob implements IAnimatable {
         return InteractionResult.sidedSuccess(client);
     }
 
+    // ==========================================================================
+// DOOR SOUND HANDLER
+// ==========================================================================
     private void playDoorSound(boolean opening, Player source) {
         if (this.level == null) return;
 
-        // --- Play the metallic door sound (server only) ---
+        // --- Play the metallic door sound (server side only) ---
         if (!this.level.isClientSide) {
             float dist   = (source != null) ? (float) source.distanceTo(this) : 0f;
             float volume = Math.max(0.35f, 1.0f - (dist / 24.0f));
@@ -1656,14 +1786,12 @@ public class CardemoEntity extends Mob implements IAnimatable {
             this.level.playSound(
                     null,
                     this.blockPosition(),
-                    opening ? SoundEvents.IRON_DOOR_OPEN : SoundEvents.IRON_DOOR_CLOSE,
-                    SoundSource.BLOCKS,
+                    opening ? net.minecraft.sounds.SoundEvents.IRON_DOOR_OPEN
+                            : net.minecraft.sounds.SoundEvents.IRON_DOOR_CLOSE,
+                    net.minecraft.sounds.SoundSource.BLOCKS,
                     volume,
                     pitch
             );
-
-            // 🚫 Removed: No headlight flash trigger here.
-            // Flash is now triggered *only* by setLocked(true/false).
         }
     }
 
