@@ -36,6 +36,7 @@ import java.util.ArrayDeque;
  *    ✓ Blinkers, brake lights, and headlights
  *    ✓ Flash overlay for lock/unlock confirmation
  *    ✓ Orientation fix — faces correct direction upon spawn
+ *    ✓ (NEW) Slight extra vertical lift when climbing slopes (visual only)
  * ============================================================================
  */
 public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
@@ -341,11 +342,26 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
         smoothTiltZ += tiltVelZ;
         smoothLift  += liftVel;
 
+        // --- Final clamps
         smoothTiltX = clamp(smoothTiltX, -MAX_TILT_DEG, MAX_TILT_DEG);
         smoothTiltZ = clamp(smoothTiltZ, -MAX_TILT_DEG, MAX_TILT_DEG);
 
+        // =====================
+        // (NEW) Extra vertical lift for uphill (nose-up) slopes — REALISTIC
+        // Uses smoothed pitch so it’s steady; proportional to slope severity.
+        // =====================
+        if (smoothTiltZ < -0.05f) {
+            float uphillFactor = clamp(Math.abs(smoothTiltZ) / MAX_TILT_DEG, 0f, 1f);
+            // 0.22f chosen per “REALISTIC” request (subtle but noticeable)
+            smoothLift += uphillFactor * 0.30f;
+        }
+
+        // --- Apply
         stack.mulPose(Vector3f.ZP.rotationDegrees(smoothTiltX));
         stack.mulPose(Vector3f.XP.rotationDegrees(smoothTiltZ));
+
+        // Apply total visual lift last so it affects the whole chassis
+        stack.translate(0.0, smoothLift, 0.0);
     }
 
     // ===============================================================
