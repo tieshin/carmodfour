@@ -113,7 +113,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
     private final AnimationFactory factory = GeckoLibUtil.createFactory(this);
     private String animationProcedure = "empty";
     private Player owner = null;
-    private static final Vec3 DRIVER_OFFSET = new Vec3(0.25, 0.45, 0.3);
+    private static final Vec3 DRIVER_OFFSET = new Vec3(0.25, 0.45, -0.2);
 
     private boolean accelerating = false;
     private boolean braking      = false;
