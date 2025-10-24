@@ -33,21 +33,36 @@ import java.util.AbstractMap;
 
 /**
  * =============================================================================
- *  CarmodfourMod — Core mod entrypoint for vehicle systems.
+ *  Tieshin's Car Mod 1.19.2 ALPHA — Core Mod Entrypoint (Forge)
  * =============================================================================
  *
- * Handles:
+ * Provides:
  *   ✓ Registry initialization (Blocks, Items, Entities)
  *   ✓ GeckoLib initialization
  *   ✓ Network packet registration
- *   ✓ Server tick work queue
+ *   ✓ Server work queue processing
+ *
+ * This Alpha focuses heavily on vehicle mechanics:
+ *   • Realistic terrain tilt & wall-aware roll
+ *   • Headlight projection with invisible light blocks
+ *   • Bump recoil and kinetic collision damage
+ *   • Silent damage handling
+ *   • Locking / ownership / door interaction systems
+ *
+ * Note:
+ *   Internal modId remains "carmodfour" to preserve registry namespaces.
  * =============================================================================
  */
 @Mod(CarmodfourMod.MODID)
 public class CarmodfourMod {
 
+    // -------------------------------------------------------------------------
+    // INTERNAL NAMESPACE (unchanged to prevent registry breakage)
+    // -------------------------------------------------------------------------
     public static final String MODID = "carmodfour";
-    public static final Logger LOGGER = LogManager.getLogger(MODID);
+
+    // Updated logger name to reflect new branding
+    public static final Logger LOGGER = LogManager.getLogger("TieshinCarMod");
 
     // -------------------------------------------------------------------------
     // NETWORK CHANNEL SETUP
@@ -82,7 +97,8 @@ public class CarmodfourMod {
         // ✅ Register custom network packets
         registerPackets();
 
-        LOGGER.info("[Carmodfour] Initialization complete.");
+        // Updated log output
+        LOGGER.info("[Tieshin's Car Mod] Initialization complete — Alpha mechanics engaged!");
     }
 
     // -------------------------------------------------------------------------
@@ -106,7 +122,7 @@ public class CarmodfourMod {
                 SteeringInputPacket::handle
         );
 
-        // --- Brake control packet (authoritative braking flag)
+        // --- Brake control packet
         addNetworkMessage(
                 BrakeControlPacket.class,
                 BrakeControlPacket::encode,
@@ -114,7 +130,7 @@ public class CarmodfourMod {
                 BrakeControlPacket::handle
         );
 
-        // --- Headlight flash packet (lock/unlock feedback)
+        // --- Headlight flash packet
         addNetworkMessage(
                 HeadlightFlashPacket.class,
                 HeadlightFlashPacket::encode,
@@ -122,7 +138,7 @@ public class CarmodfourMod {
                 HeadlightFlashPacket::handle
         );
 
-        // --- Headlight brightness packet (cycles L0 → L1 → L2 → L3 → L0)
+        // --- Headlight brightness packet
         addNetworkMessage(
                 HeadlightBrightnessPacket.class,
                 HeadlightBrightnessPacket::encode,
@@ -130,7 +146,7 @@ public class CarmodfourMod {
                 HeadlightBrightnessPacket::handle
         );
 
-        LOGGER.info("[Carmodfour] ✅ Network packets registered successfully.");
+        LOGGER.info("[Tieshin's Car Mod] ✅ Network packets registered.");
     }
 
     // -------------------------------------------------------------------------

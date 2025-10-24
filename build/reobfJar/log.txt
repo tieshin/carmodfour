@@ -1,5 +1,5 @@
 Java Launcher: C:\Program Files\Eclipse Adoptium\jdk-17.0.16.8-hotspot\bin\java.exe
-Arguments: '--in-jar, C:\Users\tiesh\MCreatorWorkspaces\carmodfour\build\libs\modid-1.0.jar, --out-jar, C:\Users\tiesh\MCreatorWorkspaces\carmodfour\build\reobfJar\output.jar, --srg-in, C:\Users\tiesh\MCreatorWorkspaces\carmodfour\build\createMcpToSrg\output.tsrg, --live'
+Arguments: '--in-jar, C:\Users\tiesh\MCreatorWorkspaces\carmodfour\build\libs\tieshins_car_mod-1.0.0-alpha.jar, --out-jar, C:\Users\tiesh\MCreatorWorkspaces\carmodfour\build\reobfJar\output.jar, --srg-in, C:\Users\tiesh\MCreatorWorkspaces\carmodfour\build\createMcpToSrg\output.tsrg, --live'
 Classpath:
  - C:\Users\tiesh\.gradle\caches\forge_gradle\maven_downloader\net\md-5\SpecialSource\1.11.0\SpecialSource-1.11.0-shaded.jar
  - C:\Users\tiesh\.gradle\caches\forge_gradle\deobf_dependencies\software\bernie\geckolib\geckolib-forge-1.19\3.1.40_mapped_official_1.19.2\geckolib-forge-1.19-3.1.40_mapped_official_1.19.2.jar
@@ -130,11 +130,11 @@ Remapping final jar
 Remapping jar...  1%
 Remapping jar... 11%
 Remapping jar... 20%
-Remapping jar... 30%
-Remapping jar... 41%
+Remapping jar... 31%
+Remapping jar... 40%
 Remapping jar... 50%
-Remapping jar... 60%
-Remapping jar... 71%
+Remapping jar... 61%
+Remapping jar... 70%
 Remapping jar... 81%
 Remapping jar... 90%
 Remapping jar... 100%

@@ -7,12 +7,13 @@ buildscript {
         classpath group: 'net.minecraftforge.gradle', name: 'ForgeGradle', version: '5.1.+', changing: true
     }
 }
+
 apply plugin: 'net.minecraftforge.gradle'
 apply plugin: 'eclipse'
 
-version = '1.0'
-group = 'com.yourname.modid'
-archivesBaseName = 'modid'
+version = '1.0.0-alpha'
+group = 'net.tieshin.carmod'
+archivesBaseName = 'tieshins_car_mod'
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
 
@@ -29,7 +30,7 @@ minecraft {
             property 'forge.logging.console.level', 'debug'
 
             mods {
-                examplemod {
+                tieshins_car_mod {
                     source sourceSets.main
                 }
             }
@@ -42,7 +43,7 @@ minecraft {
             property 'forge.logging.console.level', 'debug'
 
             mods {
-                examplemod {
+                tieshins_car_mod {
                     source sourceSets.main
                 }
             }
@@ -55,8 +56,7 @@ dependencies {
 }
 
 tasks.withType(JavaCompile).configureEach {
-    options.encoding = 'UTF-8' // Use the UTF-8 charset for Java compilation
+    options.encoding = 'UTF-8'
 }
 
 apply from: 'mcreator.gradle'
-
