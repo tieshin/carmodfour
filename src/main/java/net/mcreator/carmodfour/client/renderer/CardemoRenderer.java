@@ -12,7 +12,6 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.core.BlockPos;
-import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.util.Mth;
 
@@ -27,23 +26,15 @@ import net.mcreator.carmodfour.entity.model.CardemoModel;
 import java.util.ArrayDeque;
 
 /**
- * ============================================================================
- *  CardemoRenderer.java
- *  ---------------------
- *  Unified visual renderer for CardemoEntity:
- *    ✓ Terrain tilt and wall roll
- *    ✓ Smooth suspension spring dynamics
- *    ✓ Blinkers, brake lights, and headlights
- *    ✓ Flash overlay for lock/unlock confirmation
- *    ✓ Orientation fix — faces correct direction upon spawn
- *    ✓ (NEW) Slight extra vertical lift when climbing slopes (visual only)
- * ============================================================================
+ * CardemoRenderer — terrain-adaptive vehicle renderer
+ * ---------------------------------------------------
+ *  ✓ Geometry-based tilt & lift (no speed scaling)
+ *  ✓ Smooth spring interpolation
+ *  ✓ Emissive layers (signals, brakes, headlights, flash)
+ *  ✓ Stronger uphill extension & downhill compression
  */
 public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
 
-    // ===============================================================
-    // EMISSIVE OVERLAY TEXTURES
-    // ===============================================================
     private static final ResourceLocation LEFT_SIGNAL_EMISSIVE =
             new ResourceLocation("carmodfour:textures/entities/cardemo_l_blinker_overlay.png");
     private static final ResourceLocation RIGHT_SIGNAL_EMISSIVE =
@@ -53,16 +44,11 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
     private static final ResourceLocation HEADLIGHT_EMISSIVE =
             new ResourceLocation("carmodfour:textures/entities/cardemo_headlight_overlay.png");
 
-    // ===============================================================
-    // STATE VARIABLES
-    // ===============================================================
     private float smoothedPitch = 0f;
     private float smoothedRoll  = 0f;
-
     private float smoothTiltX = 0f;
     private float smoothTiltZ = 0f;
     private float smoothLift  = 0f;
-
     private float tiltVelX = 0f;
     private float tiltVelZ = 0f;
     private float liftVel  = 0f;
@@ -72,321 +58,214 @@ public class CardemoRenderer extends GeoEntityRenderer<CardemoEntity> {
     private final ArrayDeque<Float> tiltZHist = new ArrayDeque<>();
     private final ArrayDeque<Float> liftHist  = new ArrayDeque<>();
 
-    // ===============================================================
-    // PARAMETERS
-    // ===============================================================
     private static final double VISUAL_CLEARANCE = 0.35;
     private static final float  BASE_TILT_STRENGTH   = 3.0f;
     private static final float  BASE_OFFSET_STRENGTH = 0.2f;
-
     private static final float  SPRING_STIFFNESS  = 0.18f;
     private static final float  SPRING_DAMPING    = 0.22f;
     private static final float  MAX_TILT_DEG      = 10.0f;
 
-    // ===============================================================
-    // HEADLIGHT FLASH CONTROL
-    // ===============================================================
     private static boolean headlightFlashActive = false;
     private static long headlightFlashStart = 0L;
     private static int headlightFlashEntity = -1;
 
-    // ===============================================================
-    // CONSTRUCTOR
-    // ===============================================================
-    public CardemoRenderer(EntityRendererProvider.Context renderManager) {
-        super(renderManager, new CardemoModel());
+    public CardemoRenderer(EntityRendererProvider.Context ctx) {
+        super(ctx, new CardemoModel());
         this.shadowRadius = 1.0f;
 
-        // ===========================================================
-        // BLINKERS + BRAKE LIGHTS OVERLAY
-        // ===========================================================
+        // ──────────────────────────────────────────────
+        // SIGNAL + BRAKE LAYER
+        // ──────────────────────────────────────────────
         this.addLayer(new GeoLayerRenderer<CardemoEntity>(this) {
             @Override
-            public void render(PoseStack stack, MultiBufferSource bufferIn, int packedLightIn,
-                               CardemoEntity entity, float limbSwing, float limbSwingAmount,
-                               float partialTicks, float ageInTicks, float netHeadYaw, float headPitch) {
+            public void render(PoseStack stack, MultiBufferSource buf, int light,
+                               CardemoEntity e, float a, float b, float c, float d, float eYaw, float ePitch) {
+                if (e == null || e.level == null) return;
 
-                boolean leftVisible  = DriveStateKeybindHandler.isLeftSignalVisible();
-                boolean rightVisible = DriveStateKeybindHandler.isRightSignalVisible();
-                float brakeIntensity = DriveStateKeybindHandler.getBrakeIntensity();
+                boolean left  = DriveStateKeybindHandler.isLeftSignalVisible();
+                boolean right = DriveStateKeybindHandler.isRightSignalVisible();
+                float brake   = DriveStateKeybindHandler.getBrakeIntensity();
+                if (!left && !right && brake <= 0.01f) return;
 
-                if (!leftVisible && !rightVisible && brakeIntensity <= 0.01f)
-                    return;
-
-                GeoModelProvider<CardemoEntity> provider = this.getEntityModel();
-                GeoModel model = provider.getModel(provider.getModelResource(entity));
-
-                if (leftVisible)
-                    renderEmissive(model, stack, bufferIn, entity, LEFT_SIGNAL_EMISSIVE, 1f);
-
-                if (rightVisible)
-                    renderEmissive(model, stack, bufferIn, entity, RIGHT_SIGNAL_EMISSIVE, 1f);
-
-                if (brakeIntensity > 0.01f)
-                    renderEmissive(model, stack, bufferIn, entity, BRAKE_LIGHT_EMISSIVE, brakeIntensity);
-            }
-
-            private void renderEmissive(GeoModel model, PoseStack stack, MultiBufferSource bufferIn,
-                                        CardemoEntity entity, ResourceLocation texture, float alpha) {
-                RenderType rt = RenderType.entityTranslucentEmissive(texture);
-                VertexConsumer vc = bufferIn.getBuffer(rt);
-                this.getRenderer().render(model, entity, 0, rt, stack, bufferIn, vc,
-                        0xF000F0, OverlayTexture.NO_OVERLAY, 1f, 1f, 1f, alpha);
+                GeoModel m = this.getEntityModel().getModel(this.getEntityModel().getModelResource(e));
+                if (left)  renderEmissive(m, stack, buf, e, LEFT_SIGNAL_EMISSIVE, 1f);
+                if (right) renderEmissive(m, stack, buf, e, RIGHT_SIGNAL_EMISSIVE, 1f);
+                if (brake > 0.01f) renderEmissive(m, stack, buf, e, BRAKE_LIGHT_EMISSIVE, brake);
             }
         });
 
-        // ===========================================================
-        // NEW — HEADLIGHT BRIGHTNESS OVERLAY (L0–L3)
-        // ===========================================================
+        // ──────────────────────────────────────────────
+        // HEADLIGHT MODE LAYER
+        // ──────────────────────────────────────────────
         this.addLayer(new GeoLayerRenderer<CardemoEntity>(this) {
             @Override
-            public void render(PoseStack stack, MultiBufferSource bufferIn, int packedLightIn,
-                               CardemoEntity entity, float limbSwing, float limbSwingAmount,
-                               float partialTicks, float ageInTicks, float netHeadYaw, float headPitch) {
-
-                if (entity == null || entity.level == null || !entity.level.isClientSide) return;
-                if (!entity.isEngineOn()) return;
-
-                int hl = entity.getHeadlightMode();
-                if (hl <= 0) return;
-
+            public void render(PoseStack stack, MultiBufferSource buf, int light,
+                               CardemoEntity e, float a, float b, float c, float d, float eYaw, float ePitch) {
+                if (e == null || e.level == null || !e.isEngineOn()) return;
+                int hl = e.getHeadlightMode();
                 float alpha = switch (hl) {
-                    case 1 -> 0.20f;
-                    case 2 -> 0.50f;
-                    case 3 -> 1.00f;
-                    default -> 0f;
+                    case 1 -> 0.2f; case 2 -> 0.5f; case 3 -> 1f; default -> 0f;
                 };
                 if (alpha <= 0.01f) return;
-
-                GeoModelProvider<CardemoEntity> provider = this.getEntityModel();
-                GeoModel model = provider.getModel(provider.getModelResource(entity));
-
-                RenderType rt = RenderType.entityTranslucentEmissive(HEADLIGHT_EMISSIVE);
-                VertexConsumer vc = bufferIn.getBuffer(rt);
-                this.getRenderer().render(model, entity, 0, rt, stack, bufferIn, vc,
-                        0xF000F0, OverlayTexture.NO_OVERLAY, 1f, 1f, 1f, alpha);
+                GeoModel m = this.getEntityModel().getModel(this.getEntityModel().getModelResource(e));
+                renderEmissive(m, stack, buf, e, HEADLIGHT_EMISSIVE, alpha);
             }
         });
 
-        // ===========================================================
-        // HEADLIGHT FLASH OVERLAY (Lock/Unlock confirmation)
-        // ===========================================================
+        // ──────────────────────────────────────────────
+        // LOCK / UNLOCK FLASH LAYER
+        // ──────────────────────────────────────────────
         this.addLayer(new GeoLayerRenderer<CardemoEntity>(this) {
             @Override
-            public void render(PoseStack stack, MultiBufferSource bufferIn, int packedLightIn,
-                               CardemoEntity entity, float limbSwing, float limbSwingAmount,
-                               float partialTicks, float ageInTicks, float netHeadYaw, float headPitch) {
-
-                if (!entity.level.isClientSide) return;
-                if (entity.getId() != headlightFlashEntity || !headlightFlashActive) return;
-
+            public void render(PoseStack stack, MultiBufferSource buf, int light,
+                               CardemoEntity e, float a, float b, float c, float d, float eYaw, float ePitch) {
+                if (!headlightFlashActive || e == null || e.level == null) return;
+                if (e.getId() != headlightFlashEntity) return;
                 long elapsed = System.currentTimeMillis() - headlightFlashStart;
-                if (elapsed > 2000) {
-                    headlightFlashActive = false;
-                    return;
-                }
-
+                if (elapsed > 2000) { headlightFlashActive = false; return; }
                 float total = 850f;
-                float phase = (elapsed / total) * (float) Math.PI;
-                float raw = (float) Math.abs(Math.sin(phase * 1.8f));
-
-                float fade = 1.0f;
-                if (elapsed > total * 0.5f) {
-                    float t = (elapsed - total * 0.5f) / (total * 0.5f);
-                    fade = 1.0f - (float) Math.pow(t, 1.6);
-                }
-
+                float phase = (elapsed / total) * (float)Math.PI;
+                float raw = Math.abs((float)Math.sin(phase * 1.8f));
+                float fade = (elapsed > total * 0.5f)
+                        ? 1f - (float)Math.pow((elapsed - total * 0.5f) / (total * 0.5f), 1.6)
+                        : 1f;
                 float intensity = raw * fade * 0.9f;
                 if (intensity > 0.02f) {
-                    GeoModelProvider<CardemoEntity> provider = this.getEntityModel();
-                    GeoModel model = provider.getModel(provider.getModelResource(entity));
-                    renderEmissive(model, stack, bufferIn, entity, HEADLIGHT_EMISSIVE, intensity);
+                    GeoModel m = this.getEntityModel().getModel(this.getEntityModel().getModelResource(e));
+                    renderEmissive(m, stack, buf, e, HEADLIGHT_EMISSIVE, intensity);
                 }
-            }
-
-            private void renderEmissive(GeoModel model, PoseStack stack, MultiBufferSource bufferIn,
-                                        CardemoEntity entity, ResourceLocation texture, float alpha) {
-                RenderType rt = RenderType.entityTranslucentEmissive(texture);
-                VertexConsumer vc = bufferIn.getBuffer(rt);
-                this.getRenderer().render(model, entity, 0, rt, stack, bufferIn, vc,
-                        0xF000F0, OverlayTexture.NO_OVERLAY, 1f, 1f, 1f, alpha);
             }
         });
     }
 
-    // ===============================================================
-    // EXTERNAL TRIGGER (Headlight flash on lock/unlock or bump)
-    // ===============================================================
-    public static void triggerHeadlightFlash(CardemoEntity entity) {
-        if (entity == null || entity.level == null || !entity.level.isClientSide) return;
-        headlightFlashEntity = entity.getId();
+    public static void triggerHeadlightFlash(CardemoEntity e) {
+        if (e == null || e.level == null || !e.level.isClientSide) return;
+        headlightFlashEntity = e.getId();
         headlightFlashActive = true;
         headlightFlashStart = System.currentTimeMillis();
     }
 
-    // ===============================================================
-    // MAIN RENDER METHOD (with spawn orientation fix)
-    // ===============================================================
     @Override
-    public void render(CardemoEntity entity, float entityYaw, float partialTicks,
-                       PoseStack stack, MultiBufferSource bufferIn, int packedLightIn) {
-
-        // --- Ensure correct facing direction from entity data ---
-        float trueYaw = entity.getYRot();
-        float bodyYaw = entity.yBodyRot;
-        float interpYaw = Mth.lerp(partialTicks, bodyYaw, trueYaw);
-
+    public void render(CardemoEntity e, float yaw, float pt, PoseStack stack,
+                       MultiBufferSource buf, int light) {
+        Mth.lerp(pt, e.yBodyRot, e.getYRot());
         stack.pushPose();
-        stack.scale(2.0f, 2.0f, 2.0f);
-
-        super.render(entity, entityYaw, partialTicks, stack, bufferIn, packedLightIn);
+        stack.scale(2f, 2f, 2f);
+        super.render(e, yaw, pt, stack, buf, light);
         stack.popPose();
     }
 
-    // ===============================================================
-    // ROTATION + SPRING DYNAMICS + TERRAIN ADAPTATION
-    // ===============================================================
+    // ──────────────────────────────────────────────
+    // ROTATION & LIFT DYNAMICS
+    // ──────────────────────────────────────────────
     @Override
-    protected void applyRotations(CardemoEntity entity, PoseStack stack,
-                                  float ageInTicks, float rotationYaw, float partialTicks) {
+    protected void applyRotations(CardemoEntity e, PoseStack stack,
+                                  float age, float yaw, float pt) {
 
-        float targetPitch = entity.getXRot();
+        float targetPitch = e.getXRot();
         smoothedPitch += (targetPitch - smoothedPitch) * 0.1f;
-
-        float targetRoll = entity.getVisualRoll();
+        float targetRoll = e.getVisualRoll();
         smoothedRoll += (targetRoll - smoothedRoll) * 0.2f;
 
-        super.applyRotations(entity, stack, ageInTicks, rotationYaw, partialTicks);
+        super.applyRotations(e, stack, age, yaw, pt);
         stack.mulPose(Vector3f.ZP.rotationDegrees(smoothedRoll * 1.5f));
         stack.mulPose(Vector3f.XP.rotationDegrees(-smoothedPitch * 1.8f));
 
         if (CardemoEntity.cameraLurchPitchOffset != 0f)
             stack.mulPose(Vector3f.XP.rotationDegrees(CardemoEntity.cameraLurchPitchOffset));
 
-        if (entity.level == null) return;
+        if (e.level == null) return;
 
-        double speed = Math.min(entity.getDeltaMovement().length() * 20.0, 1.0);
-        float tiltStrength   = BASE_TILT_STRENGTH * (float)(0.5 + speed * 1.5);
-        float offsetStrength = BASE_OFFSET_STRENGTH * (float)(0.8 + 0.4 * speed);
-
-        Vec3 pos = entity.position();
-        BlockPos basePos = new BlockPos(pos.x, pos.y, pos.z);
         float tiltX = 0f, tiltZ = 0f, lift = 0f;
+        Vec3 pos = e.position();
+        BlockPos base = new BlockPos(pos.x, pos.y, pos.z);
 
-        // Wall proximity + rear bumper checks
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dz = -1; dz <= 1; dz++) {
-                    if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) != 1) continue;
-                    BlockPos check = basePos.offset(dx, dy, dz);
-                    BlockState state = entity.level.getBlockState(check);
-                    if (!state.isAir() && state.getMaterial().isSolid()) {
-                        double dist = entity.position().distanceTo(Vec3.atCenterOf(check));
+        for (int dx=-1; dx<=1; dx++)
+            for (int dy=-1; dy<=1; dy++)
+                for (int dz=-1; dz<=1; dz++) {
+                    if (Math.abs(dx)+Math.abs(dy)+Math.abs(dz)!=1) continue;
+                    BlockState st = e.level.getBlockState(base.offset(dx,dy,dz));
+                    if (!st.isAir() && st.getMaterial().isSolid()) {
+                        double dist = e.position().distanceTo(Vec3.atCenterOf(base.offset(dx,dy,dz)));
                         if (dist < VISUAL_CLEARANCE) {
                             double depth = VISUAL_CLEARANCE - dist;
-                            if (dx > 0)  tiltZ -= depth * tiltStrength;
-                            if (dx < 0)  tiltZ += depth * tiltStrength;
-                            if (dz > 0)  tiltX += depth * tiltStrength;
-                            if (dz < 0)  tiltX -= depth * tiltStrength;
-                            if (dy < 0)  lift  += depth * offsetStrength;
+                            if (dx>0) tiltZ -= depth*BASE_TILT_STRENGTH;
+                            if (dx<0) tiltZ += depth*BASE_TILT_STRENGTH;
+                            if (dz>0) tiltX += depth*BASE_TILT_STRENGTH;
+                            if (dz<0) tiltX -= depth*BASE_TILT_STRENGTH;
+                            if (dy<0) lift  += depth*BASE_OFFSET_STRENGTH;
                         }
                     }
                 }
-            }
-        }
 
-        double yawRad = Math.toRadians(entity.getYRot());
-        Vec3 rearDir = new Vec3(Math.sin(yawRad + Math.PI), 0, -Math.cos(yawRad + Math.PI)).normalize();
-        AABB rearBox = entity.getBoundingBox()
-                .move(-rearDir.x * 0.8, 0, -rearDir.z * 0.8)
-                .inflate(0.1, 0.2, 0.1);
+        addToHistory(tiltXHist,tiltX); addToHistory(tiltZHist,tiltZ); addToHistory(liftHist,lift);
+        float avgX=average(tiltXHist), avgZ=average(tiltZHist), avgLift=average(liftHist);
 
-        int totalHits = 0;
-        float totalDepth = 0f;
-        for (BlockPos bp : BlockPos.betweenClosed(
-                new BlockPos(Math.floor(rearBox.minX), Math.floor(rearBox.minY), Math.floor(rearBox.minZ)),
-                new BlockPos(Math.floor(rearBox.maxX), Math.floor(rearBox.maxY), Math.floor(rearBox.maxZ))
-        )) {
-            BlockState bs = entity.level.getBlockState(bp);
-            if (!bs.isAir() && bs.getMaterial().isSolid()) {
-                double blockCenterDist = pos.distanceTo(Vec3.atCenterOf(bp));
-                double depth = Math.max(0, 1.5 - blockCenterDist);
-                totalDepth += depth * 0.75;
-                totalHits++;
-            }
-        }
+        tiltVelX+=(avgX-smoothTiltX)*SPRING_STIFFNESS;
+        tiltVelZ+=(avgZ-smoothTiltZ)*SPRING_STIFFNESS;
+        liftVel +=(avgLift-smoothLift)*SPRING_STIFFNESS;
 
-        if (totalHits > 0) {
-            float avgDepth = totalDepth / totalHits;
-            tiltZ += avgDepth * tiltStrength * 1.6f;
-            lift  += avgDepth * offsetStrength * 0.8f;
-        }
+        tiltVelX*=(1f-SPRING_DAMPING);
+        tiltVelZ*=(1f-SPRING_DAMPING);
+        liftVel *=(1f-SPRING_DAMPING);
 
-        addToHistory(tiltXHist, tiltX);
-        addToHistory(tiltZHist, tiltZ);
-        addToHistory(liftHist,  lift);
+        smoothTiltX+=tiltVelX;
+        smoothTiltZ+=tiltVelZ;
+        smoothLift +=liftVel;
 
-        float avgX = average(tiltXHist);
-        float avgZ = average(tiltZHist);
-        float avgLift = average(liftHist);
+        smoothTiltX=clamp(smoothTiltX,-MAX_TILT_DEG,MAX_TILT_DEG);
+        smoothTiltZ=clamp(smoothTiltZ,-MAX_TILT_DEG,MAX_TILT_DEG);
 
-        tiltVelX += (avgX - smoothTiltX) * SPRING_STIFFNESS;
-        tiltVelZ += (avgZ - smoothTiltZ) * SPRING_STIFFNESS;
-        liftVel  += (avgLift - smoothLift) * SPRING_STIFFNESS;
-
-        tiltVelX *= (1.0f - SPRING_DAMPING);
-        tiltVelZ *= (1.0f - SPRING_DAMPING);
-        liftVel  *= (1.0f - SPRING_DAMPING);
-
-        smoothTiltX += tiltVelX;
-        smoothTiltZ += tiltVelZ;
-        smoothLift  += liftVel;
-
-        // --- Final clamps
-        smoothTiltX = clamp(smoothTiltX, -MAX_TILT_DEG, MAX_TILT_DEG);
-        smoothTiltZ = clamp(smoothTiltZ, -MAX_TILT_DEG, MAX_TILT_DEG);
-
-        // =====================
-        // (NEW) Extra vertical lift for uphill (nose-up) slopes — REALISTIC
-        // Uses smoothed pitch so it’s steady; proportional to slope severity.
-        // =====================
+        // ─── STRONGER UPHILL EXTENSION ───
         if (smoothTiltZ < -0.05f) {
-            float uphillFactor = clamp(Math.abs(smoothTiltZ) / MAX_TILT_DEG, 0f, 1f);
-            // 0.22f chosen per “REALISTIC” request (subtle but noticeable)
-            smoothLift += uphillFactor * 0.30f;
+            float f = clamp(Math.abs(smoothTiltZ)/MAX_TILT_DEG,0f,1f);
+            smoothLift += f * 0.85f;      // lift
+            smoothTiltZ -= f * 1.65f;     // nose-up exaggeration
+            smoothTiltX -= f * 0.45f;     // slight rear roll
         }
 
-        // --- Apply
+// ─── STRONGER DOWNHILL COMPRESSION (enhanced) ───
+        if (smoothTiltZ > 0.05f) {
+            float f = clamp(smoothTiltZ / MAX_TILT_DEG, 0f, 1f);
+
+            // stronger nose dive angle
+            smoothTiltZ += f * 6.25f;      // was 4.10f
+
+            // heavier front-end compression
+            smoothLift  -= f * 0.95f;      // was 0.70f
+
+            // increased forward body roll
+            smoothTiltX += f * 1.45f;      // was 1.10f
+
+            // additional drop to simulate suspension unloading in rear
+            smoothLift  -= f * 0.35f;      // was 0.20f
+
+            // slight nose-forward push to ground
+            smoothTiltZ += f * 1.10f;      // new
+        }
+
         stack.mulPose(Vector3f.ZP.rotationDegrees(smoothTiltX));
         stack.mulPose(Vector3f.XP.rotationDegrees(smoothTiltZ));
-
-        // Apply total visual lift last so it affects the whole chassis
         stack.translate(0.0, smoothLift, 0.0);
     }
 
-    // ===============================================================
-    // HELPERS
-    // ===============================================================
     @Override
-    public RenderType getRenderType(CardemoEntity entity, float partialTicks, PoseStack stack,
-                                    MultiBufferSource renderTypeBuffer, VertexConsumer vertexBuilder,
-                                    int packedLightIn, ResourceLocation textureLocation) {
-        return RenderType.entityTranslucent(getTextureLocation(entity));
+    public RenderType getRenderType(CardemoEntity e, float pt, PoseStack s,
+                                    MultiBufferSource buf, VertexConsumer v,
+                                    int light, ResourceLocation tex) {
+        return RenderType.entityTranslucent(getTextureLocation(e));
     }
 
-    private void addToHistory(ArrayDeque<Float> buffer, float value) {
-        if (buffer.size() >= INTERP_WINDOW) buffer.removeFirst();
-        buffer.addLast(value);
-    }
+    private void addToHistory(ArrayDeque<Float> b,float v){if(b.size()>=INTERP_WINDOW)b.removeFirst();b.addLast(v);}
+    private float average(ArrayDeque<Float> b){if(b.isEmpty())return 0f;float s=0f;for(float v:b)s+=v;return s/b.size();}
+    private static float clamp(float v,float min,float max){return Math.max(min,Math.min(max,v));}
 
-    private float average(ArrayDeque<Float> buffer) {
-        if (buffer.isEmpty()) return 0f;
-        float sum = 0f;
-        for (float v : buffer) sum += v;
-        return sum / buffer.size();
-    }
-
-    private static float clamp(float val, float min, float max) {
-        return Math.max(min, Math.min(max, val));
+    private void renderEmissive(GeoModel m, PoseStack s, MultiBufferSource buf,
+                                CardemoEntity e, ResourceLocation tex, float a) {
+        if (e==null||e.level==null) return;
+        RenderType rt = RenderType.entityTranslucentEmissive(tex);
+        VertexConsumer vc = buf.getBuffer(rt);
+        CardemoRenderer.this.render(m,e,0,rt,s,buf,vc,
+                0xF000F0,OverlayTexture.NO_OVERLAY,1f,1f,1f,a);
     }
 }
