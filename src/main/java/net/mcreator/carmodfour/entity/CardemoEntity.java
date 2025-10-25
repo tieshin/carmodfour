@@ -1909,6 +1909,42 @@ public class CardemoEntity extends Mob implements IAnimatable {
         return SoundEvents.GENERIC_EXPLODE;
     }
 
+// ==========================================================================
+// HEADLIGHT BLOCK CLEANUP ON ENTITY REMOVAL (death, /kill, despawn, discard)
+// Drop this whole section anywhere inside CardemoEntity (e.g., near other helpers)
+// ==========================================================================
+
+    /** Server-side helper: clears all invisible headlight blocks around this car. */
+    private void cleanupHeadlightBlocksNow() {
+        if (this.level == null || this.level.isClientSide) return;
+        if (!(this.level instanceof net.minecraft.server.level.ServerLevel server)) return;
+
+        net.minecraft.world.level.block.Block headlight =
+                net.minecraftforge.registries.ForgeRegistries.BLOCKS.getValue(
+                        new net.minecraft.resources.ResourceLocation(HEADLIGHT_BLOCK_ID));
+
+        if (headlight != null) {
+            clearHeadlightBlocksAround(server, headlight);
+        }
+    }
+
+    /**
+     * Called when the entity is removed from the world on either side.
+     * This is invoked for: death, /kill, discard(), chunk/despawn, dimension changes, etc.
+     */
+    @Override
+    public void onRemovedFromWorld() {
+        // --- NEW: ensure headlight blocks are cleaned on any removal path (server side) ---
+        cleanupHeadlightBlocksNow();
+
+        // Keep existing behavior
+        super.onRemovedFromWorld();
+    }
+// ==========================================================================
+// END HEADLIGHT BLOCK CLEANUP SECTION
+// ==========================================================================
+
+
     // ==========================================================================
     // MATH UTILS
     // ==========================================================================
