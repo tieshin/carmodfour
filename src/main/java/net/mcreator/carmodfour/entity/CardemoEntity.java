@@ -1,5 +1,33 @@
 package net.mcreator.carmodfour.entity;
 
+/*
+ * =============================================================================
+ *  CardemoEntity.java  —  Vehicle Entity with Wall-Aware Roll, Terrain Tilt,
+ *                         Silent Damage, and Robust Bump Recoil (Forge 1.19.2)
+ * =============================================================================
+ *
+ *  PURPOSE OF THIS REVISION
+ *  ------------------------
+ *  The user requested a "bumping" mechanic and verified that earlier attempts
+ *  did not trigger consistently. This revision strengthens bump detection and
+ *  fixes entity removal on death while preserving all existing systems:
+ *
+ *   ✓ Manual drive states (PARK/DRIVE/REVERSE) with steering inertia
+ *   ✓ Terrain pitch + wall-aware roll (client-synced)
+ *   ✓ Kinetic collision damage to others (armor-bypassing)
+ *   ✓ Silent incoming damage (no red flash for this vehicle)
+ *   ✓ NEW: Bump recoil that triggers reliably on walls or steep rises
+ *   ✓ NEW: Proper removal on death (entity vanishes as expected)
+ *
+ * =============================================================================
+ */
+
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.network.chat.Component;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.Explosion;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import software.bernie.geckolib3.util.GeckoLibUtil;
 import software.bernie.geckolib3.core.manager.AnimationFactory;
 import software.bernie.geckolib3.core.manager.AnimationData;
@@ -13,6 +41,19 @@ import software.bernie.geckolib3.core.IAnimatable;
 import net.minecraftforge.network.PlayMessages;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import net.minecraft.network.chat.Style;
+import net.minecraft.network.chat.TextColor;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Style;
+import net.minecraft.network.chat.TextColor;
+// --- Headlight block lookup / state building ---
+import net.minecraft.resources.ResourceLocation;
+import net.minecraftforge.registries.ForgeRegistries;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
+
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.Level;
@@ -35,63 +76,279 @@ import net.minecraft.world.entity.EntityDimensions;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
 
 import net.mcreator.carmodfour.init.CarmodfourModEntities;
 
-// === Added imports for collision damage/knockback ===
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.damagesource.DamageSource;
 
-// === Added imports for sounds ===
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 
 public class CardemoEntity extends Mob implements IAnimatable {
 
-    public static final EntityDataAccessor<Boolean> SHOOT = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
-    public static final EntityDataAccessor<String> ANIMATION = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
-    public static final EntityDataAccessor<String> TEXTURE = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
-    private static final EntityDataAccessor<String> VEHICLE_STATE = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
-    private static final EntityDataAccessor<Boolean> DOOR_OPEN = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
-    private static final EntityDataAccessor<String> DRIVE_MODE = SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
+    // ==========================================================================
+    // SYNCHRONIZED / RUNTIME STATE
+    // ==========================================================================
+
+    public static final EntityDataAccessor<Boolean> SHOOT =
+            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
+    public static final EntityDataAccessor<String> ANIMATION =
+            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
+    public static final EntityDataAccessor<String> TEXTURE =
+            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<String> VEHICLE_STATE =
+            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<Boolean> DOOR_OPEN =
+            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.BOOLEAN);
+    private static final EntityDataAccessor<String> DRIVE_MODE =
+            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<Float> ROLL_SYNC =
+            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.FLOAT);
 
     public enum VehicleState { LOCKED, UNLOCKED, ENGINE_OFF, ENGINE_ON }
-    public enum DriveState { PARK, DRIVE, REVERSE }
+    public enum DriveState   { PARK, DRIVE, REVERSE }
 
     private final AnimationFactory factory = GeckoLibUtil.createFactory(this);
     private String animationProcedure = "empty";
     private Player owner = null;
-    private static final Vec3 DRIVER_OFFSET = new Vec3(0.25, 0.45, 0.3);
+    private static final Vec3 DRIVER_OFFSET = new Vec3(0.25, 0.45, -0.2);
 
     private boolean accelerating = false;
-    private boolean braking = false;
-    private boolean turningLeft = false;
+    private boolean braking      = false;
+    private boolean turningLeft  = false;
     private boolean turningRight = false;
 
-    private double currentSpeed = 0.0;
-    private float currentTurnRate = 0.0f;
+    private double currentSpeed    = 0.0;
+    private float  currentTurnRate = 0.0f;
 
-    private static final double MAX_SPEED = 0.35;
-    private static final double ACCEL_FACTOR = 0.08;
-    private static final double BRAKE_FACTOR = 0.25;
-    private static final double DRAG = 0.01;
-    private static final double IDLE_SPEED = 0.02;
-    private static final float MAX_TURN_RATE = 4.0f;
-    private static final float TURN_ACCEL = 0.25f;
+    private static final double MAX_SPEED     = 0.35;
+    private static final double ACCEL_FACTOR  = 0.08;
+    private static final double BRAKE_FACTOR  = 0.25;
+    private static final double DRAG          = 0.01;
+    private static final double IDLE_SPEED    = 0.02;
+    private static final float  MAX_TURN_RATE = 4.0f;
+    private static final float  TURN_ACCEL    = 0.25f;
 
-    // === Custom hitbox ===
-    private static final float HITBOX_WIDTH = 2.5f;
+    private static final float HITBOX_WIDTH  = 2.5f;
     private static final float HITBOX_HEIGHT = 1.0f;
     private static final float HITBOX_LENGTH = 2.5f;
 
-    @OnlyIn(Dist.CLIENT)
-    private long entryStartTime = 0L;
+    @OnlyIn(Dist.CLIENT) private Vec3   clientPrevPos   = null;
+    @OnlyIn(Dist.CLIENT) private double clientSpeedBps  = 0.0;
+    private float visualRoll = 0.0f;
 
-    // === Added: client-side speed gauge state ===
-    @OnlyIn(Dist.CLIENT)
-    private Vec3 clientPrevPos = null;
-    @OnlyIn(Dist.CLIENT)
-    private double clientSpeedBps = 0.0;
+    private static final float TERRAIN_ROLL_CLAMP_DEG = 15.0f;
+    private static final float PROX_ROLL_CLAMP_DEG    = 22.5f;
+    private static final float TOTAL_ROLL_CLAMP_DEG   = 22.5f;
+    private static final float ROLL_SMOOTH            = 0.15f;
+    private static final float PROX_DEADZONE          = 0.03f;
+
+    private static final double SIDE_CHECK_DIST      = 1.35;
+    private static final double SIDE_CHECK_HALF_LEN  = 0.90;
+    private static final double SIDE_CHECK_STEP_LEN  = 0.30;
+    private static final double SIDE_CHECK_Y_START   = 0.10;
+    private static final double SIDE_CHECK_Y_END     = 1.20;
+    private static final double SIDE_CHECK_Y_STEP    = 0.30;
+
+    private static final boolean DBG_COLLISION_EVENTS = false;
+    private static final boolean DBG_BUMP_LOGS        = false;
+    private static void dlog(boolean on, String msg) { if (on) System.out.println("[Cardemo] " + msg); }
+
+    // ==========================================================================
+    // HEADLIGHT DATA (BRIGHTNESS LEVEL)
+    // ==========================================================================
+    private static final EntityDataAccessor<Integer> HEADLIGHT_MODE =
+            SynchedEntityData.defineId(CardemoEntity.class, EntityDataSerializers.INT);
+
+    // ==========================================================================
+    // HEADLIGHT LIGHT INTERNAL STATE (FADE)
+    // ==========================================================================
+    private static final String HEADLIGHT_BLOCK_ID = "carmodfour:invis_headlight";
+    private static final int    HEADLIGHT_FADE_TICKS = 10;
+
+    private int  headlightFadeProgress = 0;  // 0..HEADLIGHT_FADE_TICKS
+    private int  lastHeadlightModeSent = -1; // track mode changes to restart fade
+
+
+    // ==========================================================================
+    // HEADLIGHT BEAM LIGHT BLOCK HANDLER (MOVING BEAM + AUTO CLEANUP + INSTANT OFF)
+    // ==========================================================================
+    private void updateHeadlightBlocks() {
+        if (this.level.isClientSide || !(this.level instanceof net.minecraft.server.level.ServerLevel server))
+            return;
+
+        Block headlightBlock = ForgeRegistries.BLOCKS.getValue(new ResourceLocation(HEADLIGHT_BLOCK_ID));
+        if (headlightBlock == null)
+            return;
+
+        int mode = getHeadlightMode();
+
+        // Detect mode change → reset fade transition
+        if (mode != lastHeadlightModeSent) {
+            headlightFadeProgress = 0;
+            lastHeadlightModeSent = mode;
+        }
+
+        // ----------------------------------------------------------------------
+        // OFF STATE → INSTANT FULL CLEANUP (no fade, no delay)
+        // ----------------------------------------------------------------------
+        if (mode == 0) {
+            clearAllHeadlightBlocksImmediately(server, headlightBlock);
+            return;
+        }
+
+        // ----------------------------------------------------------------------
+        // LIGHT INTENSITY AND BEAM DISTANCE PER MODE
+        // ----------------------------------------------------------------------
+        final int targetLightLevel = switch (mode) {
+            case 1 -> 6;   // low beam
+            case 2 -> 11;  // medium beam
+            case 3 -> 15;  // high beam
+            default -> 0;
+        };
+
+        // Base range per mode
+        float baseDistance = switch (mode) {
+            case 1 -> 5f;
+            case 2 -> 8f;
+            case 3 -> 12f;
+            default -> 0f;
+        };
+
+        // Extra dynamic boost as headlights fade in (0 → 1)
+        float dynamicBoost = switch (mode) {
+            case 1 -> 1.0f;
+            case 2 -> 2.0f;
+            case 3 -> 4.0f;
+            default -> 0f;
+        };
+
+        // Smooth fade-in
+        float fade = (HEADLIGHT_FADE_TICKS <= 0)
+                ? 1.0f
+                : (headlightFadeProgress / (float) HEADLIGHT_FADE_TICKS);
+        fade = Math.min(1f, Math.max(0f, fade));
+
+        // Dynamic brightness and distance scaling
+        final int currentLevel = Math.round(targetLightLevel * fade);
+        int beamDistance = Math.round(baseDistance + (dynamicBoost * fade));
+
+        // ----------------------------------------------------------------------
+        // BEAM CREATION
+        // ----------------------------------------------------------------------
+        double yaw = Math.toRadians(this.getYRot());
+        Vec3 forward = new Vec3(-Math.sin(yaw), 0, Math.cos(yaw)).normalize();
+
+        java.util.Set<BlockPos> beamPositions = new java.util.HashSet<>();
+
+        for (int i = 2; i <= beamDistance; i++) {
+            Vec3 posVec = this.position().add(forward.scale(i));
+            BlockPos bp = new BlockPos(
+                    net.minecraft.util.Mth.floor(posVec.x),
+                    net.minecraft.util.Mth.floor(this.getY() + 0.4),
+                    net.minecraft.util.Mth.floor(posVec.z)
+            );
+
+            beamPositions.add(bp);
+
+            BlockState stateAt = level.getBlockState(bp);
+            boolean isOurs = stateAt.getBlock() == headlightBlock;
+            boolean canPlace = isOurs || level.isEmptyBlock(bp) || stateAt.getMaterial().isReplaceable();
+            if (!canPlace) continue;
+
+            BlockState newState = headlightBlock.defaultBlockState()
+                    .setValue(net.mcreator.carmodfour.block.InvisibleHeadlightBlock.LIGHT_LEVEL, currentLevel);
+
+            server.setBlock(bp, newState, 3);
+            server.getChunkSource().getLightEngine().checkBlock(bp);
+        }
+
+        // ----------------------------------------------------------------------
+        // CLEANUP — remove all old light blocks not in beam path
+        // ----------------------------------------------------------------------
+        int cleanupRadius = beamDistance + 2;
+        BlockPos carBase = this.blockPosition();
+        for (int dx = -cleanupRadius; dx <= cleanupRadius; dx++) {
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dz = -cleanupRadius; dz <= cleanupRadius; dz++) {
+                    BlockPos testPos = carBase.offset(dx, dy, dz);
+                    BlockState state = level.getBlockState(testPos);
+                    if (state.getBlock() == headlightBlock && !beamPositions.contains(testPos)) {
+                        server.setBlock(testPos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 3);
+                        server.getChunkSource().getLightEngine().checkBlock(testPos);
+                    }
+                }
+            }
+        }
+
+        // ----------------------------------------------------------------------
+        // FADE PROGRESS
+        // ----------------------------------------------------------------------
+        if (headlightFadeProgress < HEADLIGHT_FADE_TICKS)
+            headlightFadeProgress++;
+    }
+
+    /**
+     * Instantly clears ALL headlight blocks near the car — used when headlights turn OFF.
+     */
+    private void clearAllHeadlightBlocksImmediately(net.minecraft.server.level.ServerLevel server, Block headlightBlock) {
+        int radius = 16;
+        BlockPos base = this.blockPosition();
+
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -3; dy <= 3; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos pos = base.offset(dx, dy, dz);
+                    BlockState st = level.getBlockState(pos);
+                    if (st.getBlock() == headlightBlock) {
+                        server.setBlock(pos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 3);
+                        server.getChunkSource().getLightEngine().checkBlock(pos);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Clears previously placed headlight blocks in a small radius around the car.
+     */
+    private void clearHeadlightBlocksAround(net.minecraft.server.level.ServerLevel server, Block headlightBlock) {
+        if (headlightBlock == null) return;
+
+        int radius = 16;
+        BlockPos base = this.blockPosition();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos pos = base.offset(dx, dy, dz);
+                    var st = level.getBlockState(pos);
+                    if (st.getBlock() == headlightBlock) {
+                        server.setBlock(pos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 3);
+                        server.getChunkSource().getLightEngine().checkBlock(pos);
+                    }
+                }
+            }
+        }
+    }
+
+    // ==========================================================================
+    // BUMP / RECOIL SYSTEM (ROBUST)
+    // ==========================================================================
+
+    private static final double BUMP_PROBE_DIST   = 1.5;
+    private static final double BUMP_SLOPE_THRESH = 2.0;
+    private static final double RECOIL_TOTAL_DIST = 1.10;
+    private static final int    RECOIL_DURATION   = 12;
+    private static final int    RECOIL_COOLDOWN   = 8;
+    private static final float  BUMP_VOL          = 0.90f;
+    private static final float  BUMP_PITCH        = 0.85f;
+
+    private int   recoilTicks      = 0;
+    private int   recoilCooldown   = 0;
+    private Vec3  recoilDirection  = Vec3.ZERO;
+    private double recoilProgress  = 0.0;
 
     public CardemoEntity(PlayMessages.SpawnEntity packet, Level world) {
         this(CarmodfourModEntities.CARDEMO.get(), world);
@@ -99,10 +356,9 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
     public CardemoEntity(EntityType<CardemoEntity> type, Level world) {
         super(type, world);
-        xpReward = 0;
         setNoAi(false);
         setNoGravity(false);
-        this.maxUpStep = 1.1f; // smoother climb over slabs/stairs
+        this.maxUpStep = 1.1f;
     }
 
     public void setOwner(Player player) { if (owner == null) owner = player; }
@@ -110,29 +366,139 @@ public class CardemoEntity extends Mob implements IAnimatable {
     public boolean isOwner(Player player) { return owner != null && owner.getUUID().equals(player.getUUID()); }
 
     public VehicleState getState() {
-        try { return VehicleState.valueOf(this.entityData.get(VEHICLE_STATE)); }
-        catch (IllegalArgumentException e) { return VehicleState.LOCKED; }
+        try {
+            return VehicleState.valueOf(this.entityData.get(VEHICLE_STATE));
+        } catch (IllegalArgumentException e) {
+            return VehicleState.LOCKED;
+        }
     }
-    public void setState(VehicleState state) { this.entityData.set(VEHICLE_STATE, state.name()); }
-    public boolean isLocked() { return getState() == VehicleState.LOCKED; }
+
+    public void setState(VehicleState state) {
+        this.entityData.set(VEHICLE_STATE, state.name());
+    }
+
+    // ======================================================
+    // 🔒 LOCK / ENGINE STATE HELPERS + VISUAL FEEDBACK
+    // ======================================================
+    public boolean isLocked()   { return getState() == VehicleState.LOCKED; }
     public boolean isEngineOn() { return getState() == VehicleState.ENGINE_ON; }
-    public void setLocked(boolean value) { setState(value ? VehicleState.LOCKED : VehicleState.UNLOCKED); }
-    public void setEngineOn(boolean value) { setState(value ? VehicleState.ENGINE_ON : VehicleState.ENGINE_OFF); }
+
+    /**
+     * Sets the locked or unlocked state of the car.
+     *
+     * Behavior:
+     *  • Updates VehicleState synchronously.
+     *  • Plays a confirmation tone:
+     *      - Lock → low pitch
+     *      - Unlock → high pitch
+     *  • Triggers headlight flash once per toggle.
+     *
+     *  This effect occurs ONLY on lock/unlock, never on door open/shut.
+     */
+    public void setLocked(boolean value) {
+        setState(value ? VehicleState.LOCKED : VehicleState.UNLOCKED);
+
+        if (this.level != null && !this.level.isClientSide) {
+            // 🔊 Audio feedback (distinct tone)
+            this.level.playSound(
+                    null,
+                    this.blockPosition(),
+                    net.minecraft.sounds.SoundEvents.NOTE_BLOCK_BELL,
+                    net.minecraft.sounds.SoundSource.BLOCKS,
+                    0.6f,
+                    value ? 0.8f : 1.2f // lower tone = lock, higher tone = unlock
+            );
+
+            // 💡 Send headlight flash to all nearby tracking clients
+            net.mcreator.carmodfour.CarmodfourMod.PACKET_HANDLER.send(
+                    net.minecraftforge.network.PacketDistributor.TRACKING_ENTITY.with(() -> this),
+                    new net.mcreator.carmodfour.network.HeadlightFlashPacket(this.getId())
+            );
+
+            // Also send to the owner directly (for singleplayer / proximity cases)
+            if (this.getOwner() instanceof net.minecraft.server.level.ServerPlayer serverPlayer) {
+                net.mcreator.carmodfour.CarmodfourMod.PACKET_HANDLER.send(
+                        net.minecraftforge.network.PacketDistributor.PLAYER.with(() -> serverPlayer),
+                        new net.mcreator.carmodfour.network.HeadlightFlashPacket(this.getId())
+                );
+            }
+        }
+    }
+
+    public void setEngineOn(boolean value) {
+        setState(value ? VehicleState.ENGINE_ON : VehicleState.ENGINE_OFF);
+
+        if (value) {
+            // ✅ Auto-on mid headlights when engine starts
+            if (getHeadlightMode() == 0) {
+                setHeadlightMode(2);
+            }
+        } else {
+            // ✅ Auto-off headlights when engine stops
+            setHeadlightMode(0);
+        }
+    }
 
     public DriveState getDriveState() {
-        try { return DriveState.valueOf(this.entityData.get(DRIVE_MODE)); }
-        catch (IllegalArgumentException e) { return DriveState.PARK; }
+        try {
+            return DriveState.valueOf(this.entityData.get(DRIVE_MODE));
+        } catch (IllegalArgumentException e) {
+            return DriveState.PARK;
+        }
     }
+
     public void setDriveState(DriveState state) { this.entityData.set(DRIVE_MODE, state.name()); }
 
     public boolean isDoorOpen() { return this.entityData.get(DOOR_OPEN); }
     public void setDoorOpen(boolean open) { this.entityData.set(DOOR_OPEN, open); }
 
-    public String getTexture() { return this.entityData.get(TEXTURE); }
-    public String getSyncedAnimation() { return this.entityData.get(ANIMATION); }
-    public void setAnimation(String name) { this.entityData.set(ANIMATION, name); }
+    // ======================================================
+    // 💡 HEADLIGHT BRIGHTNESS CONTROL
+    // ======================================================
 
-    public void setAnimationProcedure(String animation) { setAnimation(animation); }
+    /** Returns the current headlight brightness level (0–3). */
+    public int getHeadlightMode() {
+        return this.entityData.get(HEADLIGHT_MODE);
+    }
+
+    /** Sets the headlight brightness level (0–3, clamped). */
+    public void setHeadlightMode(int level) {
+        this.entityData.set(HEADLIGHT_MODE, Math.max(0, Math.min(3, level)));
+    }
+
+    /**
+     * Cycles headlight brightness through levels:
+     *   0 (Off) → 1 (Dim) → 2 (Normal) → 3 (Bright) → 0
+     * Also plays a short feedback sound for each step.
+     */
+    public void cycleHeadlightMode() {
+        int next = (getHeadlightMode() + 1) % 4;
+        setHeadlightMode(next);
+
+        if (this.level != null && !this.level.isClientSide) {
+            float pitch = 0.8f + (0.1f * next);
+            this.level.playSound(null, this.blockPosition(),
+                    SoundEvents.LEVER_CLICK, SoundSource.BLOCKS, 0.6f, pitch);
+
+            // Flash headlights when toggled on (skip for 0/off)
+            if (next > 0) {
+                net.mcreator.carmodfour.CarmodfourMod.PACKET_HANDLER.send(
+                        net.minecraftforge.network.PacketDistributor.TRACKING_ENTITY.with(() -> this),
+                        new net.mcreator.carmodfour.network.HeadlightFlashPacket(this.getId())
+                );
+            }
+        }
+    }
+
+    public String getTexture()         { return this.entityData.get(TEXTURE); }
+    public String getSyncedAnimation() { return this.entityData.get(ANIMATION); }
+    public void   setAnimation(String name) { this.entityData.set(ANIMATION, name); }
+    public void   setAnimationProcedure(String animation) { setAnimation(animation); }
+
+    public void setAccelerating(boolean b) { this.accelerating = b; }
+    public void setBraking(boolean b)      { this.braking = b; }
+    public void setTurningLeft(boolean b)  { this.turningLeft = b; }
+    public void setTurningRight(boolean b) { this.turningRight = b; }
 
     @Override
     protected void defineSynchedData() {
@@ -143,6 +509,9 @@ public class CardemoEntity extends Mob implements IAnimatable {
         this.entityData.define(VEHICLE_STATE, VehicleState.LOCKED.name());
         this.entityData.define(DOOR_OPEN, false);
         this.entityData.define(DRIVE_MODE, DriveState.PARK.name());
+        this.entityData.define(ROLL_SYNC, 0.0f);
+        // --- NEW: Headlight brightness level (0 = off, 1 = dim, 2 = normal, 3 = bright) ---
+        this.entityData.define(HEADLIGHT_MODE, 0);
     }
 
     @Override
@@ -151,6 +520,7 @@ public class CardemoEntity extends Mob implements IAnimatable {
         tag.putString("DriveState", getDriveState().name());
         tag.putString("VehicleState", getState().name());
         tag.putBoolean("DoorOpen", isDoorOpen());
+        tag.putInt("HeadlightMode", getHeadlightMode());
     }
 
     @Override
@@ -159,167 +529,1071 @@ public class CardemoEntity extends Mob implements IAnimatable {
         if (tag.contains("DriveState")) setDriveState(DriveState.valueOf(tag.getString("DriveState")));
         if (tag.contains("VehicleState")) setState(VehicleState.valueOf(tag.getString("VehicleState")));
         if (tag.contains("DoorOpen")) setDoorOpen(tag.getBoolean("DoorOpen"));
+        if (tag.contains("HeadlightMode")) setHeadlightMode(tag.getInt("HeadlightMode"));
     }
-
-    public void setAccelerating(boolean accelerating) { this.accelerating = accelerating; }
-    public void setBraking(boolean braking) { this.braking = braking; }
-    public void setTurningLeft(boolean turningLeft) { this.turningLeft = turningLeft; }
-    public void setTurningRight(boolean turningRight) { this.turningRight = turningRight; }
 
     @Override
     public void tick() {
         super.tick();
-        float tickDelta = 1f;
 
+
+
+        // ---------------------------------------------------------------------
+        // 🧍 Prevent steering drift when no rider is present
+        // ---------------------------------------------------------------------
+        if (this.getPassengers().isEmpty()) {
+            // 🚫 Reset all input flags so the car doesn't keep turning after dismount
+            this.accelerating = false;
+            this.braking = false;
+            this.turningLeft = false;
+            this.turningRight = false;
+
+            // 🌀 Gradually reduce any residual rotation so it stops spinning smoothly
+            if (Math.abs(this.currentTurnRate) > 0.01f) {
+                this.currentTurnRate *= 0.85f; // damp turning over time
+                this.setYRot(this.getYRot() + currentTurnRate);
+            } else {
+                this.currentTurnRate = 0f;
+            }
+
+            // 🚗 Apply light drag to gradually slow forward momentum while empty
+            if (this.currentSpeed > 0) {
+                this.currentSpeed *= 0.98;
+                if (this.currentSpeed < 0.001) this.currentSpeed = 0;
+            }
+        }
+        // ---------------------------------------------------------------------
+
+        // ---------------------------------------------------------------------
+        // 🔄 Cooldowns & recoil
+        // ---------------------------------------------------------------------
+        if (recoilCooldown > 0) recoilCooldown--;
+
+// ---------------------------------------------------------------------
+// 🧠 SERVER-SIDE LOGIC — movement, collisions, headlights
+// ---------------------------------------------------------------------
         if (!level.isClientSide) {
-            if (isEngineOn()) {
-                DriveState mode = getDriveState();
+            boolean engineOn = isEngineOn();
 
-                switch (mode) {
-                    case DRIVE -> handleDriveMode(tickDelta);
-                    case REVERSE -> handleReverseMode(tickDelta);
-                    case PARK -> handleParkMode();
+            // 🔥 Emit fire effects when HP is low (discrete scaling by health)
+            float hpRatio = this.getHealth() / this.getMaxHealth();
+            if (hpRatio <= 0.6f) { // 60% or less = damaged engine zone
+                double yawRad = Math.toRadians(this.getYRot());
+
+                // Front of the car — slightly forward and upward (hood area)
+                Vec3 frontPos = this.position()
+                        .add(-Math.sin(yawRad) * 1.8, 0.8, Math.cos(yawRad) * 1.8);
+
+                long gt = this.level.getGameTime();
+
+                // 🔊 FIRE CRACKLE — faster and louder as damage increases
+                long soundInterval;
+                if (hpRatio > 0.4f) soundInterval = 40L;
+                else if (hpRatio > 0.3f) soundInterval = 30L;
+                else if (hpRatio > 0.2f) soundInterval = 20L;
+                else if (hpRatio > 0.1f) soundInterval = 12L;
+                else soundInterval = 8L;
+
+                float severity = 1.0f - hpRatio; // 0.0 → 1.0 scale (healthy → dying)
+                float fireVol = 0.35f + (0.85f * severity); // 0.35–1.2
+                float firePitch = 0.95f + (0.15f * this.random.nextFloat() * severity); // subtle variation
+
+                if (gt % soundInterval == 0L) {
+                    this.level.playSound(
+                            null,
+                            frontPos.x, frontPos.y, frontPos.z,
+                            SoundEvents.FIRE_AMBIENT,
+                            SoundSource.BLOCKS,
+                            fireVol,
+                            firePitch
+                    );
                 }
 
-                // === Added: handle forward collisions with entities ===
+                // 💨 SMOKE FREQUENCY BY HEALTH
+                long smokeInterval;
+                if (hpRatio > 0.4f)      smokeInterval = 60L;   // 3s
+                else if (hpRatio > 0.3f) smokeInterval = 40L;   // 2s
+                else if (hpRatio > 0.2f) smokeInterval = 20L;   // 1s
+                else if (hpRatio > 0.1f) smokeInterval = 12L;   // 0.6s
+                else                     smokeInterval = 6L;    // 0.3s
+
+                if (gt % smokeInterval == 0L && this.level instanceof net.minecraft.server.level.ServerLevel server) {
+                    int count = (int) (2 + (8 * severity));
+                    double spread = 0.1 + (0.15 * severity);
+                    double speed = 0.015 + (0.02 * severity);
+
+                    // Main smoke
+                    server.sendParticles(
+                            ParticleTypes.CAMPFIRE_COSY_SMOKE,
+                            frontPos.x, frontPos.y, frontPos.z,
+                            count,
+                            spread, spread / 2, spread,
+                            speed
+                    );
+
+                    // 💨+💨 Extra dust / ash when HP below 15%
+                    if (hpRatio <= 0.15f) {
+                        int dustCount = (int) (6 + (8 * severity));
+                        double dustSpread = 0.25 + (0.1 * severity);
+                        double dustSpeed = 0.01 + (0.015 * severity);
+
+                        server.sendParticles(
+                                ParticleTypes.ASH,
+                                frontPos.x, frontPos.y - 0.2, frontPos.z,
+                                dustCount,
+                                dustSpread, 0.2, dustSpread,
+                                dustSpeed
+                        );
+                    }
+                }
+
+                // 💣 TNT HISS — every 1.5s when HP < 15%, scales with severity
+                if (hpRatio <= 0.15f && gt % 30L == 0L) {
+                    float hissVol = 0.5f + (1.2f * severity); // up to ~1.7 at critical HP
+                    float hissPitch = 1.0f + (0.3f * severity); // higher pitch as it worsens
+
+                    this.level.playSound(
+                            null,
+                            frontPos.x, frontPos.y, frontPos.z,
+                            SoundEvents.TNT_PRIMED,
+                            SoundSource.BLOCKS,
+                            hissVol,
+                            hissPitch
+                    );
+                }
+            }
+
+            if (engineOn) {
+                // --- Handle driving physics ---
+                switch (getDriveState()) {
+                    case DRIVE   -> handleDriveMode();
+                    case REVERSE -> handleReverseMode();
+                    case PARK    -> handleParkMode();
+                }
+
+                // --- Handle collisions (damage + recoil) ---
                 handleEntityCollisions();
+
+                // --- NEW: Update invisible light blocks for headlights ---
+                updateHeadlightBlocks();
+
+
+            } else {
+                // --- NEW: Engine OFF → clear remaining headlight blocks ---
+                if (this.level instanceof net.minecraft.server.level.ServerLevel server) {
+                    clearHeadlightBlocksAround(
+                            server,
+                            net.mcreator.carmodfour.init.CarmodfourModBlocks.INVIS_HEADLIGHT.get()
+                    );
+                }
             }
         }
 
-        if (level.isClientSide) {
-            // === Added: speed gauge computation (client-only) ===
-            Vec3 now = this.position();
-            if (clientPrevPos == null) {
-                clientPrevPos = now;
-            } else {
-                Vec3 d = new Vec3(now.x - clientPrevPos.x, 0, now.z - clientPrevPos.z);
-                double inst = d.length() * 20.0; // blocks per second (20 ticks per second)
-                clientSpeedBps = clientSpeedBps * 0.8 + inst * 0.2; // light smoothing
-                clientPrevPos = now;
-            }
-
-            Minecraft mc = Minecraft.getInstance();
-            renderDriveStateHotbar(mc);
+        // ---------------------------------------------------------------------
+        // 🎨 CLIENT-SIDE LOGIC — overlays, HUD, camera
+        // ---------------------------------------------------------------------
+        else {
+            updateClientSpeedOverlay();
         }
     }
 
-    // === Added: proportional damage/knockback and instant stop on collision ===
-    private void handleEntityCollisions() {
-        if (currentSpeed <= 0.05) return;
+    // --------------------------------------------------------------------------
+    // CAMERA LURCH VISUAL (shared to renderer)
+    // --------------------------------------------------------------------------
+    @OnlyIn(Dist.CLIENT)
+    public static float cameraLurchPitchOffset = 0f;
 
+    // --------------------------------------------------------------------------
+    // CAMERA LURCH (forward/back impact jolt)
+    // --------------------------------------------------------------------------
+    @OnlyIn(Dist.CLIENT)
+    private static float lurchStrength = 0f;
+    @OnlyIn(Dist.CLIENT)
+    private static int lurchTicks = 0;
+    @OnlyIn(Dist.CLIENT)
+    private static int lurchDuration = 0;
+
+
+    // --------------------------------------------------------------------------
+    // CLIENT-SIDE HOTBAR OVERLAY (Speed / Drive / HP / Horn / Turn Signals)
+    // --------------------------------------------------------------------------
+    @OnlyIn(Dist.CLIENT)
+    private void updateClientSpeedOverlay() {
+        // --- Standard speed overlay logic ---
+        Vec3 now = this.position();
+        if (clientPrevPos == null) clientPrevPos = now;
+        else {
+            Vec3 delta = now.subtract(clientPrevPos);
+            double instSpeed = new Vec3(delta.x, 0, delta.z).length() * 20.0;
+            clientSpeedBps = clientSpeedBps * 0.8 + instSpeed * 0.2;
+            clientPrevPos = now;
+        }
+
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player != null && mc.player.isPassengerOfSameVehicle(this) && isEngineOn()) {
+            // --- Drive mode indicators ---
+            String p = getDriveState() == DriveState.PARK    ? "( P )" : "P";
+            String d = getDriveState() == DriveState.DRIVE   ? "( D )" : "D";
+            String r = getDriveState() == DriveState.REVERSE ? "( R )" : "R";
+
+            // --- Speed and health stats ---
+            float speed = (float) clientSpeedBps;
+            float hp    = this.getHealth();
+            float maxHp = this.getMaxHealth();
+            int hpInt   = (int) Math.ceil(hp);
+            int maxInt  = (int) Math.ceil(maxHp);
+
+            // --- Determine HP color ---
+            float ratio = hp / maxHp;
+            String colorCode;
+            if (ratio > 0.6f) colorCode = "§a";       // Green (safe)
+            else if (ratio > 0.25f) colorCode = "§e"; // Yellow (moderate)
+            else colorCode = "§c";                    // Red (critical)
+
+            // --- Horn indicator ---
+            boolean hornDown = net.mcreator.carmodfour.client.DriveStateKeybindHandler.HORN_KEY.isDown();
+            String horn = hornDown ? "§cH§r" : "H";
+
+            // --- Turn signal indicators ---
+            boolean leftActive  = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isLeftSignalOn();
+            boolean rightActive = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isRightSignalOn();
+            boolean leftVisible  = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isLeftSignalVisible();
+            boolean rightVisible = net.mcreator.carmodfour.client.DriveStateKeybindHandler.isRightSignalVisible();
+
+            String leftArrow  = leftActive  ? (leftVisible  ? "§e<§r" : "§7<§r") : "§7<§r";
+            String rightArrow = rightActive ? (rightVisible ? "§e>§r" : "§7>§r") : "§7>§r";
+
+            // --- Headlight indicator ---
+            int hl = getHeadlightMode();
+            MutableComponent hlSymbol = switch (hl) {
+                case 1 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0x9A9A4A)));
+                case 2 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0xE6C34A)));
+                case 3 -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0xFFF76B)));
+                default -> Component.literal("L").withStyle(Style.EMPTY.withColor(TextColor.fromRgb(0x444444)));
+            };
+
+            // --- Build and display overlay ---
+            MutableComponent overlay = Component.literal(
+                            String.format("%s || %s || | %s | %s | %s |  ||  %.1f b/s  ||  HP : %s%d§r / %d || ",
+                                    leftArrow, horn, p, d, r, speed, colorCode, hpInt, maxInt))
+                    .append(hlSymbol)
+                    .append(Component.literal(String.format(" || %s", rightArrow)));
+
+            mc.gui.setOverlayMessage(overlay, false);
+        }
+    }
+
+
+    private void handleEntityCollisions() {
+        if (currentSpeed <= 0.01) return;
         double yawRad = Math.toRadians(this.getYRot());
         Vec3 forward = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
-
-        // Look slightly ahead of the car and a bit wider than the car to catch contacts
-        AABB hitbox = this.getBoundingBox().move(forward.scale(0.6)).inflate(0.5);
-
+        AABB hitbox = this.getBoundingBox().move(forward.scale(0.6)).inflate(0.6);
         java.util.List<Entity> entities = level.getEntities(this, hitbox,
                 e -> e instanceof LivingEntity && e != this && !e.isPassengerOfSameVehicle(this));
-
         if (entities.isEmpty()) return;
-
-        double speedNow = currentSpeed;
-        currentSpeed = 0.0; // stop the car on impact
-
-        for (Entity e : entities) {
-            if (e instanceof LivingEntity living) {
-                // Lethal-ish at max speed: scales 0..20 damage (vanilla player has 20 HP)
-                float damage = (float) Math.min(20.0, (speedNow / MAX_SPEED) * 20.0);
-                living.hurt(DamageSource.mobAttack(this), damage);
-
-                // Fling forward proportional to speed
-                Vec3 fling = new Vec3(forward.x, 0.3, forward.z).scale(speedNow * 4.0);
-                living.push(fling.x, fling.y, fling.z);
-                living.hasImpulse = true;
-            }
-        }
-    }
-
-    private void handleDriveMode(float tickDelta) {
-        double targetMax = MAX_SPEED;
-
-        if (!this.getPassengers().isEmpty()) {
-            if (accelerating) currentSpeed += ACCEL_FACTOR * (targetMax - currentSpeed) * tickDelta;
-            else if (braking) currentSpeed -= BRAKE_FACTOR * currentSpeed * tickDelta;
-            else { currentSpeed -= DRAG * tickDelta; if (currentSpeed < IDLE_SPEED) currentSpeed = IDLE_SPEED; }
-        } else {
-            double decayPerTick = (currentSpeed - IDLE_SPEED) / (5.0 / tickDelta);
-            currentSpeed -= decayPerTick;
-        }
-
-        currentSpeed = Math.max(0, Math.min(currentSpeed, targetMax));
-
-        float desiredTurn = 0f;
-        if (turningLeft && !turningRight) desiredTurn = -MAX_TURN_RATE;
-        else if (turningRight && !turningLeft) desiredTurn = MAX_TURN_RATE;
-
-        updateTurnAndMotion(desiredTurn, tickDelta, false);
-    }
-
-    private void handleReverseMode(float tickDelta) {
-        double targetMax = MAX_SPEED * 0.5;
-        double accelFactor = ACCEL_FACTOR * 0.75;
-
-        if (!this.getPassengers().isEmpty()) {
-            if (accelerating) currentSpeed += accelFactor * (targetMax - currentSpeed) * tickDelta;
-            else if (braking) currentSpeed -= BRAKE_FACTOR * currentSpeed * tickDelta;
-            else { currentSpeed -= DRAG * tickDelta; if (currentSpeed < IDLE_SPEED) currentSpeed = IDLE_SPEED; }
-        } else {
-            double decayPerTick = (currentSpeed - IDLE_SPEED) / (5.0 / tickDelta);
-            currentSpeed -= decayPerTick;
-        }
-
-        currentSpeed = Math.max(0, Math.min(currentSpeed, targetMax));
-
-        float desiredTurn = 0f;
-        if (turningLeft && !turningRight) desiredTurn = -MAX_TURN_RATE;
-        else if (turningRight && !turningLeft) desiredTurn = MAX_TURN_RATE;
-
-        desiredTurn *= -1;
-
-        updateTurnAndMotion(desiredTurn, tickDelta, true);
-    }
-
-    private void handleParkMode() {
+        double speedBps = currentSpeed * 20.0;
         currentSpeed = 0.0;
-        currentTurnRate *= 0.5f;
-        if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0f;
+        for (Entity e : entities) {
+            if (!(e instanceof LivingEntity living)) continue;
+            if (living instanceof Player p && (p.isCreative() || p.isSpectator())) continue;
+            float damageHp = (float)(speedBps * 4.0);
+            living.hurt(DamageSource.OUT_OF_WORLD, damageHp);
+            double kb = Math.min(0.5 + speedBps / 3.0, 10.0);
+            double up = Math.min(0.20 + speedBps / 50.0, 1.0);
+            Vec3 fling = new Vec3(forward.x, up, forward.z).normalize().scale(kb);
+            living.push(fling.x, fling.y, fling.z);
+            living.hasImpulse = true;
+        }
     }
 
-    private void updateTurnAndMotion(float desiredTurn, float tickDelta, boolean reverse) {
-        float turnDiff = desiredTurn - currentTurnRate;
-        float turnStep = TURN_ACCEL * tickDelta;
-        if (Math.abs(turnDiff) < turnStep) currentTurnRate = desiredTurn;
-        else currentTurnRate += Math.signum(turnDiff) * turnStep;
+    private void handleDriveMode()  { accelerateAndMove(false); }
+    private void handleReverseMode(){ accelerateAndMove(true);  }
+    private void handleParkMode()   { currentSpeed = 0.0; currentTurnRate *= 0.5f; }
+
+    private void accelerateAndMove(boolean reverse) {
+        if (recoilTicks > 0) {
+            applyRecoilStep();
+            double yawRadRecoil = Math.toRadians(this.getYRot());
+            applyTerrainAndProximityTilt(yawRadRecoil);
+            return;
+        }
+
+        double targetMax = reverse ? MAX_SPEED * 0.5 : MAX_SPEED;
+        double accel     = reverse ? ACCEL_FACTOR * 0.75 : ACCEL_FACTOR;
+
+        if (accelerating) currentSpeed += accel * (targetMax - currentSpeed);
+        else if (braking) currentSpeed -= BRAKE_FACTOR * currentSpeed;
+        else {
+            currentSpeed -= DRAG;
+            if (currentSpeed < IDLE_SPEED) currentSpeed = IDLE_SPEED;
+        }
+
+        if (currentSpeed < 0) currentSpeed = 0;
+        if (currentSpeed > targetMax) currentSpeed = targetMax;
+
+        float desiredTurn = 0f;
+        if (turningLeft && !turningRight) desiredTurn = -MAX_TURN_RATE;
+        if (turningRight && !turningLeft) desiredTurn = MAX_TURN_RATE;
+        if (reverse) desiredTurn *= -1f;
+
+        float deltaTurn = (desiredTurn - currentTurnRate) * TURN_ACCEL;
+        currentTurnRate += deltaTurn;
 
         if (!turningLeft && !turningRight) {
             float speedRatio = (float)(currentSpeed / MAX_SPEED);
-            float dynamicCenterFactor = 0.85f + 0.15f * (1 - speedRatio);
-            currentTurnRate *= dynamicCenterFactor;
+            float centerFactor = 0.85f + 0.15f * (1 - speedRatio);
+            currentTurnRate *= centerFactor;
             if (Math.abs(currentTurnRate) < 0.01f) currentTurnRate = 0f;
         }
 
-        this.setYRot(this.getYRot() + currentTurnRate * tickDelta);
-
+        this.setYRot(this.getYRot() + currentTurnRate);
         double yawRad = Math.toRadians(this.getYRot());
-        double motionX = reverse ? Math.sin(yawRad) * currentSpeed : -Math.sin(yawRad) * currentSpeed;
-        double motionZ = reverse ? -Math.cos(yawRad) * currentSpeed : Math.cos(yawRad) * currentSpeed;
 
-        // Adjust vertical motion for smoother slope climbing
-        double verticalBoost = 0.0;
-        if (this.onGround && currentSpeed > 0.05) {
-            verticalBoost = 0.1 * Math.min(1.0, currentSpeed / MAX_SPEED);
+
+
+// ---------------------------------------------------------------------
+// 🧩 BUMP DETECTION (velocity-scaled HP loss + anvil sound intensity)
+// ---------------------------------------------------------------------
+        if (currentSpeed > 0.05 && recoilCooldown == 0) {
+            boolean frontHit = !reverse && isBlockedAheadOrTooSteep(yawRad);
+            boolean rearHit  =  reverse && isBlockedBehindOrTooSteep(yawRad);
+
+            if (frontHit || rearHit) {
+                double impactSpeedBps = Math.abs(currentSpeed * 20.0);
+
+                // Apply HP loss scaled by impact velocity
+                if (impactSpeedBps > 1.5) {
+                    double damage = Math.pow(impactSpeedBps, 1.25) * 0.35;
+                    if (damage < 1.0) damage = 1.0;
+                    this.hurt(DamageSource.GENERIC, (float) damage);
+                }
+
+                // 🔊 Play anvil sound scaled by impact velocity
+                if (!this.level.isClientSide) {
+                    float vol = (float) Math.min(0.2 + (impactSpeedBps / 10.0f) * 0.8f, 1.0f);
+                    float pitch = 0.75f + (float) Math.min(impactSpeedBps / 20.0f, 0.3f);
+                    this.level.playSound(null, this.blockPosition(),
+                            SoundEvents.ANVIL_PLACE, SoundSource.BLOCKS, vol, pitch);
+                }
+
+                // 💡 Trigger brief headlight flash client-side on impact
+                if (this.level.isClientSide) {
+                    net.mcreator.carmodfour.client.renderer.CardemoRenderer.triggerHeadlightFlash(this);
+                }
+
+                triggerRecoil(yawRad, rearHit);
+                applyTerrainAndProximityTilt(yawRad);
+                return;
+            }
         }
 
-        Vec3 motion = new Vec3(motionX, this.getDeltaMovement().y + verticalBoost, motionZ);
-        this.setDeltaMovement(motion);
-        this.hasImpulse = true;
-        this.move(MoverType.SELF, motion);
+        // ---------------------------------------------------------------------
+        // 🧱 Preemptive bump clamp — stop forward motion if wall detected right before move
+        // ---------------------------------------------------------------------
+        if (recoilCooldown == 0 && currentSpeed > 0.01) {
+            boolean frontHit = !reverse && isBlockedAheadOrTooSteep(yawRad);
+            boolean rearHit  =  reverse && isBlockedBehindOrTooSteep(yawRad);
 
-        applyTerrainTilt(yawRad, tickDelta);
+            if (frontHit || rearHit) {
+                double impactSpeedBps = Math.abs(currentSpeed * 20.0);
+                currentSpeed = 0;
+
+                // Apply scaled HP loss
+                if (impactSpeedBps > 1.5) {
+                    double damage = Math.pow(impactSpeedBps, 1.25) * 0.35;
+                    if (damage < 1.0) damage = 1.0;
+                    this.hurt(DamageSource.GENERIC, (float) damage);
+                }
+
+                // 🔊 Velocity-scaled anvil sound
+                if (!this.level.isClientSide) {
+                    float vol = (float) Math.min(0.2 + (impactSpeedBps / 10.0f) * 0.8f, 1.0f);
+                    float pitch = 0.75f + (float) Math.min(impactSpeedBps / 20.0f, 0.3f);
+                    this.level.playSound(null, this.blockPosition(),
+                            SoundEvents.ANVIL_PLACE, SoundSource.BLOCKS, vol, pitch);
+                }
+
+                triggerRecoil(yawRad, rearHit);
+                applyTerrainAndProximityTilt(yawRad);
+                return;
+            }
+        }
+
+        double motionX = reverse ?  Math.sin(yawRad) * currentSpeed : -Math.sin(yawRad) * currentSpeed;
+        double motionZ = reverse ? -Math.cos(yawRad) * currentSpeed :  Math.cos(yawRad) * currentSpeed;
+
+        double verticalBoost = 0.0;
+        if (this.onGround && currentSpeed > 0.05)
+            verticalBoost = 0.1 * Math.min(1.0, currentSpeed / MAX_SPEED);
+
+        // ---------------------------------------------------------------------
+        // 🎥 APPLY CAMERA LURCH (client-side forward/recoil motion)
+        // ---------------------------------------------------------------------
+        if (level.isClientSide) {
+            applyCameraLurch(Minecraft.getInstance());
+        }
+
+        // ---------------------------------------------------------------------
+        // 🚗 MOTION + MOVEMENT
+        // ---------------------------------------------------------------------
+        Vec3 motion = new Vec3(motionX, getDeltaMovement().y + verticalBoost, motionZ);
+        setDeltaMovement(motion);
+        hasImpulse = true;
+        move(MoverType.SELF, motion);
+
+        // ---------------------------------------------------------------------
+        // 🧭 TERRAIN TILT + WALL PROXIMITY
+        // ---------------------------------------------------------------------
+        applyTerrainAndProximityTilt(yawRad);
+
+        // ---------------------------------------------------------------------
+        // 🕐 FORWARD GRACE WINDOW — prevent false bumps when coasting
+        // ---------------------------------------------------------------------
+        if (!reverse) {
+            if (currentSpeed > 0.05) {
+                forwardGraceTicks = FORWARD_GRACE_MAX;
+            } else if (forwardGraceTicks > 0) {
+                forwardGraceTicks--;
+            }
+        }
     }
 
-    // === Hitbox shape ===
+
+// ==========================================================================
+// BUMP / RECOIL IMPLEMENTATION — full-block climbable (air-above aware)
+// ==========================================================================
+
+    // --- Motion grace buffer (prevents false bumps when slowing or coasting) ---
+    private int forwardGraceTicks = 0;
+    private static final int FORWARD_GRACE_MAX = 6; // ~0.3 s grace at 20 TPS
+
+    // --- Probe sampling parameters ---
+    private static final double PROBE_STEP_BASE = 0.25; // fixed sample spacing (m)
+    private static final int    GROUND_SMOOTH_WINDOW = 3; // rolling average window
+    private static final double MAX_CONTINUOUS_SLOPE_DEG = 55.0; // tolerance for hill angle
+
+    // --- Prevents multiple bump sounds firing at once (e.g., double anvil overlap) ---
+    private int recentBumpSoundTicks = 0;
+
+    // ==========================================================================
+    // DAMAGE + DEATH HANDLING — silent, death-safe despawn
+    // ==========================================================================
+    @Override
+    public boolean hurt(DamageSource source, float amount) {
+        if (this.isInvulnerableTo(source)) return false;
+
+        // Use vanilla reduction so attributes & events stay correct
+        boolean took = super.hurt(source, amount);
+
+        // Suppress red flash / invulnerability blink
+        this.hurtTime = 0;
+        this.invulnerableTime = 0;
+
+        // Server-side immediate cleanup if dead
+        if (!this.level.isClientSide && !this.isAlive()) {
+            this.discard();
+        }
+        return took;
+    }
+
+    // --------------------------------------------------------------------------
+    // die() override — cinematic explosion with enhanced knockback (Forge 1.19.2)
+    // --------------------------------------------------------------------------
+    @Override
+    public void die(DamageSource cause) {
+        super.die(cause); // run vanilla event chain first
+
+        if (!this.level.isClientSide && !this.isRemoved()) {
+            double x = this.getX();
+            double y = this.getY() + 0.5;
+            double z = this.getZ();
+
+            // 💥 Explosion parameters
+            float explosionPower = 3.5f;  // TNT-level blast radius
+            boolean causesFire = true;
+            Explosion.BlockInteraction blockInteraction = Explosion.BlockInteraction.BREAK;
+
+            // 💣 Play TNT explosion sound
+            this.level.playSound(
+                    null,
+                    x, y, z,
+                    SoundEvents.GENERIC_EXPLODE,
+                    SoundSource.BLOCKS,
+                    1.8f,
+                    1.0f + (this.random.nextFloat() * 0.2f - 0.1f)
+            );
+
+            // 💨 Pre-burst visuals
+            if (this.level instanceof net.minecraft.server.level.ServerLevel server) {
+                for (int i = 0; i < 25; i++) {
+                    double ox = (this.random.nextDouble() - 0.5) * 2.0;
+                    double oy = this.random.nextDouble() * 1.2;
+                    double oz = (this.random.nextDouble() - 0.5) * 2.0;
+
+                    server.sendParticles(ParticleTypes.LARGE_SMOKE, x + ox, y + oy, z + oz, 1, 0, 0, 0, 0.02);
+                    server.sendParticles(ParticleTypes.FLAME,       x + ox * 0.4, y + oy * 0.4, z + oz * 0.4, 1, 0, 0, 0, 0.04);
+                    server.sendParticles(ParticleTypes.ASH,         x + ox * 0.3, y + oy * 0.3, z + oz * 0.3, 1, 0, 0, 0, 0.02);
+                }
+            }
+
+            // 💥 Create explosion (Forge 1.19.2 signature)
+            this.level.explode(
+                    this,                 // source entity
+                    x, y, z,              // explosion position
+                    explosionPower,       // strength
+                    causesFire,           // whether to ignite blocks
+                    blockInteraction      // block destruction mode
+            );
+
+            // 🌪️ Apply enhanced manual knockback pulse
+            double radius = 8.0; // affect radius (larger than explosion)
+            double force  = 3.0; // base force multiplier (3× stronger)
+
+            java.util.List<Entity> nearby = this.level.getEntities(this,
+                    new net.minecraft.world.phys.AABB(
+                            x - radius, y - radius, z - radius,
+                            x + radius, y + radius, z + radius));
+
+            for (Entity e : nearby) {
+                if (e == this || e.isSpectator()) continue;
+
+                // Skip creative players
+                if (e instanceof Player p && (p.isCreative() || p.isSpectator()))
+                    continue;
+
+                Vec3 dir = e.position().subtract(x, y, z);
+                double dist = Math.max(0.1, dir.length());
+                dir = dir.normalize();
+
+                // Exponentially decay with distance
+                double strength = (1.0 - (dist / radius)) * force;
+                Vec3 knock = dir.scale(strength);
+                e.push(knock.x, knock.y + 0.5, knock.z);
+                e.hurtMarked = true; // ensure it applies visually
+            }
+
+            // 🔥 Post-explosion smoke burst
+            if (this.level instanceof net.minecraft.server.level.ServerLevel server) {
+                for (int i = 0; i < 30; i++) {
+                    double ox = (this.random.nextDouble() - 0.5) * 3.0;
+                    double oy = this.random.nextDouble() * 2.0;
+                    double oz = (this.random.nextDouble() - 0.5) * 3.0;
+                    server.sendParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE,
+                            x + ox, y + oy, z + oz,
+                            1, 0, 0, 0, 0.04);
+                }
+            }
+
+            // 🧹 Final guaranteed removal
+            this.discard();
+        }
+    }
+
+    /**
+     * Detects a true, unclimbable rise (or solid wall) directly ahead or behind.
+     * Handles stairs, slabs, voxel hills, and solid-with-air-above full-block slopes.
+     */
+    private boolean isBlockedAheadOrTooSteep(double yawRad) {
+        return detectBumpDirection(yawRad, false);
+    }
+
+    private boolean isBlockedBehindOrTooSteep(double yawRad) {
+        return detectBumpDirection(yawRad, true);
+    }
+
+    /**
+     * Generic directional bump detection — continuous-slope and air-above aware.
+     * (Restored robust version so recoil triggers reliably.)
+     */
+    private boolean detectBumpDirection(double yawRad, boolean reverse) {
+        if (recoilTicks > 0) return false;
+
+        // Grace period
+        if (!reverse && forwardGraceTicks > 0 && currentSpeed < 0.05)
+            return false;
+
+        // Fixed lookahead (front = 2 m, rear = 3 m)
+        final double lookahead = reverse ? 3.0 : 2.0;
+        final double tinyNoise = 0.12;
+        final double climbCap  = this.maxUpStep + 0.05;
+
+        // Lag compensation (TPS scaling) — left as-is if you want
+        double tickScale = 1.0;
+        if (level != null && level.getServer() != null) {
+            double tps = Math.max(10.0, level.getServer().getAverageTickTime() > 0
+                    ? 1000.0 / level.getServer().getAverageTickTime()
+                    : 20.0);
+            tickScale = 20.0 / tps;
+        }
+
+        Vec3 forward = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad)).normalize();
+        if (reverse) forward = forward.scale(-1);
+
+        Vec3 here = this.position();
+        double hereY = getGroundY(here);
+
+        // Offset to bumper
+        Vec3 originOffset = forward.scale(reverse ? -1.0 : 0.4);
+        Vec3 originPos = here.add(originOffset);
+
+        // ----------------------------------------------------------------------
+        // (A) Continuous ascent-aware probe check — full-block and voxel-slope friendly
+        // ----------------------------------------------------------------------
+        double probeStep = PROBE_STEP_BASE * tickScale;
+        double lastY = hereY;
+        double totalRise = 0.0;
+        double totalRun  = 0.0;
+        int consecutiveSmallRises = 0;
+
+        java.util.ArrayDeque<Double> smoothHeights = new java.util.ArrayDeque<>();
+
+        for (double dist = probeStep; dist <= lookahead + 1e-6; dist += probeStep) {
+            Vec3 p = originPos.add(forward.scale(dist));
+            double y = getGroundY(p);
+
+            smoothHeights.add(y);
+            if (smoothHeights.size() > GROUND_SMOOTH_WINDOW)
+                smoothHeights.removeFirst();
+            double avgY = smoothHeights.stream().mapToDouble(Double::doubleValue).average().orElse(y);
+
+            double rise = avgY - lastY;
+            totalRun += probeStep;
+
+            // --- Solid-with-air-above logic (voxel hills, 1-block steps) ---
+            BlockPos basePos = new BlockPos(p.x, Math.floor(y - 0.5), p.z);
+            BlockPos abovePos = basePos.above();
+            var baseState = level.getBlockState(basePos);
+            var aboveState = level.getBlockState(abovePos);
+            boolean solid = !baseState.isAir() && baseState.getMaterial().isSolid();
+            boolean airAbove = aboveState.isAir();
+
+            // --- NEW: Air-with-solid-above logic (detect overhangs / columns) ---
+            if (baseState.isAir() && !aboveState.isAir() &&
+                    aboveState.getMaterial().isSolid() &&
+                    !aboveState.getCollisionShape(level, abovePos).isEmpty()) {
+
+                // this means there's an air gap with a solid directly above it
+                dlog(DBG_BUMP_LOGS, String.format(
+                        "BUMP (%s): air below solid at %s (overhang/column detected)",
+                        reverse ? "rear" : "front", abovePos
+                ));
+                return true;
+            }
+
+            if (solid && airAbove && rise <= (1.0 + 0.15)) {
+                // treat this as a step we can mount
+                lastY = basePos.getY() + 1.0;
+                consecutiveSmallRises++;
+                continue;
+            }
+
+            // --- Solid-with-solid-above check (2-block-tall wall / overhang) ---
+            if (solid && !airAbove) {
+                BlockPos secondAbove = abovePos.above();
+                boolean twoSolidStack = !level.getBlockState(abovePos).isAir()
+                        && !level.getBlockState(secondAbove).isAir();
+                if (twoSolidStack) {
+                    dlog(DBG_BUMP_LOGS, String.format(
+                            "BUMP (%s): solid 2-block stack at %s",
+                            reverse ? "rear" : "front", basePos
+                    ));
+                    return true;
+                }
+            }
+
+
+
+            if (rise > 0) {
+                totalRise += rise;
+
+                // Allow chained 1-block ascents (continuous voxel ramps)
+                if (rise <= (this.maxUpStep + 0.15)) {
+                    consecutiveSmallRises++;
+                    lastY = avgY;
+                    continue;
+                }
+
+                // if multiple small steps in sequence → still climbable
+                double avgSlope = Math.toDegrees(Math.atan2(totalRise, totalRun));
+                if (consecutiveSmallRises >= 2 && avgSlope <= MAX_CONTINUOUS_SLOPE_DEG) {
+                    lastY = avgY;
+                    continue;
+                }
+            }
+
+            if (rise <= tinyNoise) { lastY = avgY; continue; }
+
+            // Skip climbable blocks (stairs/slabs)
+            if (isClimbableBlock(basePos)) { lastY = avgY; continue; }
+
+            // check steep or tall rise
+            double slopeDeg = Math.toDegrees(Math.atan2(rise, probeStep));
+            if (slopeDeg > 70.0 && rise > climbCap) {
+                dlog(DBG_BUMP_LOGS, String.format(
+                        "BUMP (%s): slope=%.1f° rise=%.2f > climbCap=%.2f at dist=%.1f",
+                        reverse ? "rear" : "front", slopeDeg, rise, climbCap, dist));
+
+                // if bump impact reduces health to 0, ensure despawn
+                if (!this.level.isClientSide && !this.isAlive()) this.discard();
+                return true;
+            }
+
+            // reset if descent or flat
+            if (rise <= 0) consecutiveSmallRises = 0;
+            lastY = avgY;
+        }
+
+// ----------------------------------------------------------------------
+// (B) Wall/solid check (same as before)
+// ----------------------------------------------------------------------
+        final double[] lateral = { 0.0, +0.35, -0.35 };
+        final double[] heights = { 0.6, 1.2 };
+        Vec3 right = new Vec3(Math.cos(yawRad), 0, Math.sin(yawRad));
+
+        for (double h : heights) {
+            for (double lat : lateral) {
+                Vec3 origin = originPos.add(right.scale(lat)).add(0.0, h, 0.0);
+                Vec3 end = origin.add(forward.scale(lookahead + 0.1));
+
+                var ctx = new net.minecraft.world.level.ClipContext(
+                        origin, end,
+                        net.minecraft.world.level.ClipContext.Block.COLLIDER,
+                        net.minecraft.world.level.ClipContext.Fluid.NONE,
+                        this
+                );
+                var hit = this.level.clip(ctx);
+                if (hit != null && hit.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK) {
+                    var bhr = (net.minecraft.world.phys.BlockHitResult) hit;
+                    BlockPos pos = bhr.getBlockPos();
+                    var state = level.getBlockState(pos);
+
+                    boolean solidWall = !state.isAir() &&
+                            (state.getMaterial().isSolid() || !state.getCollisionShape(level, pos).isEmpty());
+                    if (!solidWall) continue;
+                    if (isClimbableBlock(pos)) continue;
+
+                    double hitY = hit.getLocation().y;
+                    double riseFromGround = hitY - hereY;
+
+                    // --- NEW (minimal): trigger on any 2-block vertical solid stack ---
+                    // Use collision shapes (more accurate than isAir for slabs/stairs/fluids).
+                    boolean solidHere  = !state.getCollisionShape(level, pos).isEmpty();
+                    boolean solidAbove = !level.getBlockState(pos.above())
+                            .getCollisionShape(level, pos.above()).isEmpty();
+                    boolean solidBelow = !level.getBlockState(pos.below())
+                            .getCollisionShape(level, pos.below()).isEmpty();
+
+                    // If we hit the lower block of a 2-high stack (solidHere && solidAbove),
+                    // OR we hit the upper block (solidBelow && solidHere), it's a true wall/overhang.
+                    if ((solidHere && solidAbove) || (solidBelow && solidHere)) {
+                        dlog(DBG_BUMP_LOGS, String.format(
+                                "BUMP (%s): 2-block vertical solid stack at %s (h=%.2f rise=%.2f)",
+                                reverse ? "rear" : "front", pos, h, riseFromGround));
+                        return true;
+                    }
+
+                    // Existing tall/steep check remains for single massive rises.
+                    if (riseFromGround > climbCap) {
+                        dlog(DBG_BUMP_LOGS, String.format(
+                                "BUMP (%s): wall rise=%.2f > climbCap=%.2f at %s",
+                                reverse ? "rear" : "front", riseFromGround, climbCap, pos));
+
+                        if (!this.level.isClientSide && !this.isAlive()) this.discard();
+                        return true;
+                    }
+                }
+            }
+        }
+
+        {
+            Vec3 start = this.position().add(0, 1.2, 0);  // about roof level
+            Vec3 end   = start.add(this.getForward().scale(3.0)); // 3 m straight ahead
+
+            var ctx = new ClipContext(start, end,
+                    ClipContext.Block.COLLIDER,
+                    ClipContext.Fluid.NONE,
+                    this);
+
+            var hit = level.clip(ctx);
+
+            if (hit != null && hit.getType() == HitResult.Type.BLOCK) {
+                BlockHitResult bhr = (BlockHitResult) hit;
+                dlog(true, "Hit: " + bhr.getBlockPos() + "  " + level.getBlockState(bhr.getBlockPos()).getBlock());
+            } else {
+                dlog(true, "No hit at all from " + start + " → " + end);
+            }
+        }
+
+        return false;
+    }
+
+    /** Recognizes stairs, slabs, gentle terrain, and solid-with-air-above blocks as climbable. */
+    private boolean isClimbableBlock(BlockPos pos) {
+        if (level == null) return false;
+        var state = level.getBlockState(pos);
+        if (state.isAir()) return false;
+
+        // Full solid block with air above = climbable
+        if (state.getMaterial().isSolid() && level.isEmptyBlock(pos.above()))
+            return true;
+
+        var block = state.getBlock();
+        var key = net.minecraftforge.registries.ForgeRegistries.BLOCKS.getKey(block);
+        if (key == null) return false;
+
+        String name = key.getPath();
+        return name.contains("stairs") || name.contains("slab")
+                || name.contains("path") || name.contains("carpet")
+                || name.contains("grass_block") || name.contains("gravel");
+    }
+
+    /** Initiates recoil motion, cancels movement, plays thunk (single/cooldowned sound). */
+    private void triggerRecoil(double yawRad, boolean reverseHit) {
+        // 🎥 (Camera lurch left intact; harmless if it does nothing on your client)
+        if (this.level.isClientSide) {
+            double impactSpeedBps = Math.abs(currentSpeed * 20.0);
+            if (impactSpeedBps > 2.0) {
+                lurchStrength = (float)Math.min(impactSpeedBps / 10.0, 0.5f);
+                lurchDuration = (int)Math.min(30 + (impactSpeedBps * 4.0), 30);
+                lurchTicks = lurchDuration;
+            }
+        }
+
+        if (recoilTicks > 0 || recoilCooldown > 0) return;
+
+        double dirSign = reverseHit ? -1.0 : 1.0;
+        this.recoilDirection = new Vec3(Math.sin(yawRad) * dirSign, 0, -Math.cos(yawRad) * dirSign).normalize();
+        this.recoilTicks = RECOIL_DURATION;
+        this.recoilProgress = 0.0;
+        this.currentSpeed = 0.0;
+        setDeltaMovement(new Vec3(0, getDeltaMovement().y, 0));
+
+        // 🔊 Single anvil sound with short cooldown to prevent overlaps
+        if (!this.level.isClientSide && recentBumpSoundTicks == 0) {
+            this.level.playSound(null, this.blockPosition(),
+                    SoundEvents.ANVIL_PLACE, SoundSource.BLOCKS,
+                    BUMP_VOL, BUMP_PITCH);
+            recentBumpSoundTicks = 5; // ~0.25s at 20 TPS
+        }
+
+        // Handle death in case the bump itself is lethal
+        if (!this.level.isClientSide && !this.isAlive()) this.discard();
+    }
+
+    /** Applies one step of the recoil using a quadratic ease-out curve. */
+    private void applyRecoilStep() {
+        if (recoilTicks <= 0) return;
+
+        double tPrev = recoilProgress;
+        double tNext = (RECOIL_DURATION - recoilTicks + 1) / (double) RECOIL_DURATION;
+        recoilProgress = tNext;
+
+        double easePrev = 1.0 - Math.pow(1.0 - tPrev, 2.0);
+        double easeNext = 1.0 - Math.pow(1.0 - tNext, 2.0);
+        double distThisTick = (easeNext - easePrev) * RECOIL_TOTAL_DIST;
+
+        Vec3 step = recoilDirection.scale(distThisTick);
+        move(MoverType.SELF, step);
+
+        recoilTicks--;
+        if (recoilTicks <= 0) {
+            recoilCooldown = RECOIL_COOLDOWN;
+            recoilDirection = Vec3.ZERO;
+            recoilProgress = 0.0;
+        }
+
+        // Final safety: despawn if dead after recoil finishes
+        if (!this.level.isClientSide && !this.isAlive()) this.discard();
+    }
+
+// ==========================================================================
+// END BUMP / RECOIL IMPLEMENTATION — death-safe
+// ==========================================================================
+
+    // ==========================================================================
+    // TILT CALCULATION (PITCH + ROLL COMBINED)
+    // ==========================================================================
+
+    private void applyTerrainAndProximityTilt(double yawRad) {
+        final double sampleDistance = 0.8;
+
+        // Basis
+        Vec3 forward = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
+        Vec3 right   = new Vec3(Math.cos(yawRad),  0, Math.sin(yawRad));
+
+        // Sample points around the car
+        Vec3 frontPos = position().add(forward.scale(sampleDistance));
+        Vec3 backPos  = position().add(forward.scale(-sampleDistance));
+        Vec3 rightPos = position().add(right.scale(sampleDistance));
+        Vec3 leftPos  = position().add(right.scale(-sampleDistance));
+
+        // Ground heights (ceiling-safe)
+        double frontY = getGroundY(frontPos);
+        double backY  = getGroundY(backPos);
+        double rightY = getGroundY(rightPos);
+        double leftY  = getGroundY(leftPos);
+
+        // Pitch from front/back
+        float pitchTarget = (float) Math.toDegrees(Math.atan2(frontY - backY, sampleDistance * 2.0)) * -1F;
+        if (pitchTarget > 60f) pitchTarget = 60f;
+        if (pitchTarget < -60f) pitchTarget = -60f;
+        float newPitch = lerp(getXRot(), pitchTarget, 0.25f);
+        setXRot(newPitch);
+
+        // Roll: terrain + proximity
+        double dyRoll = leftY - rightY;
+        float rawTerrainRoll = (float) Math.toDegrees(Math.atan2(dyRoll, sampleDistance * 2.0));
+        if (rawTerrainRoll >  TERRAIN_ROLL_CLAMP_DEG) rawTerrainRoll =  TERRAIN_ROLL_CLAMP_DEG;
+        if (rawTerrainRoll < -TERRAIN_ROLL_CLAMP_DEG) rawTerrainRoll = -TERRAIN_ROLL_CLAMP_DEG;
+        float terrainRoll = rawTerrainRoll;
+
+        float leftClose  = computeSideCloseness(true,  yawRad);
+        float rightClose = computeSideCloseness(false, yawRad);
+        float diff = (leftClose - rightClose);
+        if (Math.abs(diff) < PROX_DEADZONE) diff = 0f;
+        float proximityRoll = diff * PROX_ROLL_CLAMP_DEG;
+
+        float targetRoll = terrainRoll + proximityRoll;
+        if (targetRoll >  TOTAL_ROLL_CLAMP_DEG) targetRoll =  TOTAL_ROLL_CLAMP_DEG;
+        if (targetRoll < -TOTAL_ROLL_CLAMP_DEG) targetRoll = -TOTAL_ROLL_CLAMP_DEG;
+
+        visualRoll = lerp(visualRoll, targetRoll, ROLL_SMOOTH);
+
+        // Sync to clients
+        if (!level.isClientSide) this.entityData.set(ROLL_SYNC, visualRoll);
+    }
+
+    /**
+     * Side closeness scanner for wall-aware roll. Returns value in [0,1].
+     */
+    private float computeSideCloseness(boolean leftSide, double yawRad) {
+        if (level == null) return 0f;
+
+        // Basis
+        Vec3 forward = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
+        Vec3 right   = new Vec3(Math.cos(yawRad),  0, Math.sin(yawRad));
+        Vec3 sideDir = leftSide ? right.scale(-1) : right;
+
+        float strongest = 0f;
+
+        // Along the car length
+        for (double t = -SIDE_CHECK_HALF_LEN; t <= SIDE_CHECK_HALF_LEN + 1e-6; t += SIDE_CHECK_STEP_LEN) {
+            Vec3 along = forward.scale(t);
+
+            // Outward rays
+            for (double s = 0.0; s <= SIDE_CHECK_DIST + 1e-6; s += 0.15) {
+                Vec3 base = position().add(along).add(sideDir.scale(s));
+
+                // Vertical samples
+                for (double yoff = SIDE_CHECK_Y_START; yoff <= SIDE_CHECK_Y_END + 1e-6; yoff += SIDE_CHECK_Y_STEP) {
+                    BlockPos bp = new BlockPos(
+                            (int) Math.floor(base.x),
+                            (int) Math.floor(this.getY() + yoff - 0.2),
+                            (int) Math.floor(base.z)
+                    );
+                    var state = level.getBlockState(bp);
+
+                    // Solid or any collision shape counts
+                    if (!state.isAir() && (state.getMaterial().isSolid() || !state.getCollisionShape(level, bp).isEmpty())) {
+                        float frac = (float) (1.0 - (s / SIDE_CHECK_DIST));
+                        if (frac > strongest) strongest = frac;
+                        // Stop this outward slice once obstacle is found
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (strongest < 0f) strongest = 0f;
+        if (strongest > 1f) strongest = 1f;
+        return strongest;
+    }
+
+    /**
+     * Bidirectional ground sampler that can detect the highest solid surface
+     * beneath a given point — works for stairs, slabs, floating blocks, and columns.
+     */
+    private double getGroundY(Vec3 pos) {
+        BlockPos base = new BlockPos(
+                net.minecraft.util.Mth.floor(pos.x),
+                net.minecraft.util.Mth.floor(pos.y),
+                net.minecraft.util.Mth.floor(pos.z)
+        );
+
+        int worldMin = level.getMinBuildHeight();
+        int worldMax = level.getMaxBuildHeight();
+
+        double groundY = Double.NEGATIVE_INFINITY;
+
+        // --- (1) Scan downward from current Y to find topmost solid ---
+        for (int y = base.getY(); y >= worldMin && y >= base.getY() - 6; y--) {
+            BlockPos down = new BlockPos(base.getX(), y, base.getZ());
+            BlockState st = level.getBlockState(down);
+
+            if (!st.isAir() && !st.getCollisionShape(level, down).isEmpty()) {
+                double top = y + st.getCollisionShape(level, down).max(net.minecraft.core.Direction.Axis.Y);
+                groundY = Math.max(groundY, top);
+                break;
+            }
+        }
+
+        // --- (2) Scan upward (air-down) to handle floating slabs or steps above air ---
+        for (int y = base.getY() + 1; y <= worldMax && y <= base.getY() + 4; y++) {
+            BlockPos up = new BlockPos(base.getX(), y, base.getZ());
+            BlockState st = level.getBlockState(up);
+
+            if (!st.isAir() && !st.getCollisionShape(level, up).isEmpty()) {
+                double top = y + st.getCollisionShape(level, up).max(net.minecraft.core.Direction.Axis.Y);
+                groundY = Math.max(groundY, top);
+                break;
+            }
+        }
+
+        // --- (3) Fallback: heightmap if nothing solid found ---
+        if (groundY == Double.NEGATIVE_INFINITY) {
+            groundY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, base.getX(), base.getZ());
+        }
+
+        return groundY;
+    }
+
+    // ==========================================================================
+    // CAMERA LURCH SYSTEM (forward/back head impulse)
+    // ==========================================================================
+    @OnlyIn(Dist.CLIENT)
+    private void applyCameraLurch(Minecraft mc) {
+        if (mc.player == null || !mc.player.isPassengerOfSameVehicle(this)) return;
+        if (lurchTicks <= 0) return;
+
+        // Normalized time progression (0 → 1)
+        float t = (float)(lurchDuration - lurchTicks) / (float)lurchDuration;
+
+        // Ease curve: quick push forward, then gentle rebound
+        float intensity;
+        if (t < 0.4f) {
+            // Rapid initial pitch forward
+            intensity = (float)(Math.sin(t * Math.PI * 1.2) * lurchStrength);
+            mc.player.turn(0f, intensity * 4.0f);
+        } else {
+            // Recoil recovery
+            float recoverT = (t - 0.4f) / 0.6f; // normalize [0.4..1.0]
+            if (recoverT > 1f) recoverT = 1f;
+            intensity = (float)(Math.cos(recoverT * Math.PI) * lurchStrength * 0.5f);
+            mc.player.turn(0f, -intensity * 2.0f);
+        }
+
+        lurchTicks--;
+        if (lurchTicks <= 0) {
+            lurchStrength = 0f;
+            lurchDuration = 0;
+        }
+    }
+
+    // ==========================================================================
+    // DIMENSIONS / BOUNDING BOX OVERRIDES
+    // ==========================================================================
+
     @Override
     public EntityDimensions getDimensions(Pose pose) {
         return EntityDimensions.fixed(HITBOX_WIDTH, HITBOX_HEIGHT);
@@ -339,87 +1613,134 @@ public class CardemoEntity extends Mob implements IAnimatable {
         ));
     }
 
-    private void applyTerrainTilt(double yawRad, float tickDelta) {
-        double sampleDistance = 0.8;
-        Vec3 forwardVec = new Vec3(-Math.sin(yawRad), 0, Math.cos(yawRad));
-
-        Vec3 frontPos = this.position().add(forwardVec.scale(sampleDistance));
-        Vec3 backPos = this.position().add(forwardVec.scale(-sampleDistance));
-
-        double frontY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) frontPos.x, (int) frontPos.z);
-        double backY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) backPos.x, (int) backPos.z);
-
-        double dy = frontY - backY;
-        double dx = sampleDistance * 2;
-
-        float targetPitch = (float)Math.toDegrees(Math.atan2(dy, dx)) * -1F;
-        targetPitch = Math.max(-30F, Math.min(30F, targetPitch));
-
-        float smoothing = 0.3F;
-        float newPitch = this.getXRot() + (targetPitch - this.getXRot()) * smoothing;
-        this.setXRot(newPitch);
-    }
-
-    @OnlyIn(Dist.CLIENT)
-    private void renderDriveStateHotbar(Minecraft mc) {
-        Player player = mc.player;
-        if (player == null) return;
-        if (player.getVehicle() != this || !isEngineOn()) return;
-
-        // === Updated formatting with speed gauge ===
-        String p = getDriveState() == DriveState.PARK ? "( P )" : "P";
-        String d = getDriveState() == DriveState.DRIVE ? "( D )" : "D";
-        String r = getDriveState() == DriveState.REVERSE ? "( R )" : "R";
-
-        String text = String.format("| %s | %s | %s | || %.1f b/s", p, d, r, clientSpeedBps);
-        mc.gui.setOverlayMessage(net.minecraft.network.chat.Component.literal(text), false);
-    }
+    // ==========================================================================
+    // RIDING / PASSENGER POSITIONING
+    // ==========================================================================
 
     @Override
     public void positionRider(Entity passenger) {
         if (this.hasPassenger(passenger)) {
-            Vec3 rotatedOffset = DRIVER_OFFSET.yRot((float)Math.toRadians(-this.getYRot()));
+            Vec3 rotatedOffset = DRIVER_OFFSET.yRot((float) Math.toRadians(-this.getYRot()));
             Vec3 targetPos = this.position().add(rotatedOffset);
             passenger.setPos(targetPos.x, targetPos.y, targetPos.z);
         }
     }
 
-    // === Added: server-side iron door sounds with distance-based volume/pitch ===
-    private void playDoorSound(boolean opening, Player source) {
-        if (this.level.isClientSide) return; // ensure it plays once server-side, sent to all nearby clients
-        float dist = (source != null) ? (float) source.distanceTo(this) : 0f;
-        float volume = Math.max(0.35f, 1.0f - (dist / 24.0f));   // fades with distance, never fully silent
-        float pitch  = Math.max(0.75f, 1.0f - (dist / 48.0f));   // slightly lower pitch when farther
+    // ==========================================================================
+    // SIMPLE PLAYER DISMOUNT — ejects to the TRUE LEFT side of the car
+    // ==========================================================================
+    @Override
+    public Vec3 getDismountLocationForPassenger(LivingEntity passenger) {
+        // --- Determine left/right vectors based on Minecraft yaw (clockwise-positive)
+        double yawRad = Math.toRadians(this.getYRot());
 
-        this.level.playSound(
-                null, // null => broadcast around this position
-                this.blockPosition(),
-                opening ? SoundEvents.IRON_DOOR_OPEN : SoundEvents.IRON_DOOR_CLOSE,
-                SoundSource.BLOCKS,
-                volume,
-                pitch
+        // ✅ To get LEFT: rotate forward vector +90° (instead of -90°)
+        // Forward = (-sin(yaw), 0, cos(yaw))
+        // Left    = (-cos(yaw), 0, -sin(yaw))
+        Vec3 left = new Vec3(-Math.cos(yawRad), 0, -Math.sin(yawRad)).normalize();
+
+        // --- Step 1: Preferred dismount offset (1.8 blocks to the left)
+        Vec3 base = this.position().add(left.scale(-1.8));
+
+        // --- Step 2: Find a safe dismount spot near that base
+        BlockPos bp = new BlockPos(base.x, Math.floor(this.getY()), base.z);
+        Vec3 safe = net.minecraft.world.entity.vehicle.DismountHelper.findSafeDismountLocation(
+                passenger.getType(), this.level, bp, true
         );
+
+        if (safe != null) {
+            // Small upward nudge to avoid clipping into ground or wheel arches
+            return safe.add(0.0, 0.15, 0.0);
+        }
+
+        // --- Step 3: Fallback — if no valid spot, force left offset beside vehicle
+        // This ensures consistent left-side ejection even in tight spaces
+        return new Vec3(base.x, this.getY() + 0.15, base.z);
     }
+
+// ==========================================================================
+// PLAYER INTERACTION (LOCK / DOOR / ENTER / REPAIR)
+// ==========================================================================
 
     @Override
     public InteractionResult mobInteract(Player player, InteractionHand hand) {
         boolean sneaking = player.isShiftKeyDown();
-        boolean client = this.level.isClientSide;
+        boolean client   = this.level.isClientSide;
 
+        // ----------------------------------------------------------------------
+        // 🛠️ REPAIR FEATURE — Right-click with Iron Ingot to restore 5 HP
+        // ----------------------------------------------------------------------
+        if (!client) {
+            var stack = player.getItemInHand(hand);
+
+            if (stack.getItem() == net.minecraft.world.item.Items.IRON_INGOT) {
+                float currentHP = this.getHealth();
+                float maxHP = this.getMaxHealth();
+
+                if (currentHP < maxHP) {
+                    float healAmount = Math.min(5.0f, maxHP - currentHP);
+                    this.heal(healAmount);
+
+                    // Consume one ingot (unless in Creative mode)
+                    if (!player.getAbilities().instabuild) {
+                        stack.shrink(1);
+                    }
+
+                    // Play repair sound + particles
+                    this.level.playSound(
+                            null,
+                            this.blockPosition(),
+                            net.minecraft.sounds.SoundEvents.ANVIL_USE,
+                            net.minecraft.sounds.SoundSource.BLOCKS,
+                            0.8f,
+                            1.1f
+                    );
+
+                    if (this.level instanceof net.minecraft.server.level.ServerLevel server) {
+                        server.sendParticles(
+                                net.minecraft.core.particles.ParticleTypes.CRIT,
+                                this.getX(), this.getY() + 1.0, this.getZ(),
+                                10,
+                                0.3, 0.3, 0.3,
+                                0.1
+                        );
+                    }
+
+                    // Notify the player
+                    player.displayClientMessage(
+                            net.minecraft.network.chat.Component.literal(
+                                    "§aRepaired car: +" + (int) healAmount + " HP (" +
+                                            (int) this.getHealth() + "/" + (int) this.getMaxHealth() + ")"
+                            ), true
+                    );
+
+                    return InteractionResult.SUCCESS;
+                } else {
+                    player.displayClientMessage(
+                            net.minecraft.network.chat.Component.literal("§eCar is already at full health."),
+                            true
+                    );
+                    return InteractionResult.FAIL;
+                }
+            }
+        }
+
+        // ----------------------------------------------------------------------
+        // 🚗 EXISTING DOOR / LOCK / ENTER LOGIC
+        // ----------------------------------------------------------------------
         if (sneaking) {
             if (!client) {
                 if (isLocked()) {
-                    player.displayClientMessage(net.minecraft.network.chat.Component.literal("Car is locked."), true);
+                    player.displayClientMessage(
+                            net.minecraft.network.chat.Component.literal("Car is locked."), true);
                     return InteractionResult.FAIL;
                 }
 
                 if (isDoorOpen()) {
-                    // play close sound
                     playDoorSound(false, player);
                     setAnimation("r_door_close");
                     setDoorOpen(false);
                 } else {
-                    // play open sound
                     playDoorSound(true, player);
                     setAnimation("r_door_open");
                     setDoorOpen(true);
@@ -430,15 +1751,15 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
         if (!client) {
             if (isLocked()) {
-                player.displayClientMessage(net.minecraft.network.chat.Component.literal("Car is locked."), true);
+                player.displayClientMessage(
+                        net.minecraft.network.chat.Component.literal("Car is locked."), true);
                 return InteractionResult.FAIL;
             }
-
             if (!isDoorOpen()) {
-                player.displayClientMessage(net.minecraft.network.chat.Component.literal("Door is shut."), true);
+                player.displayClientMessage(
+                        net.minecraft.network.chat.Component.literal("Door is shut."), true);
                 return InteractionResult.FAIL;
             }
-
             if (this.getPassengers().isEmpty()) {
                 player.startRiding(this, true);
                 setOwner(player);
@@ -450,36 +1771,68 @@ public class CardemoEntity extends Mob implements IAnimatable {
         return InteractionResult.sidedSuccess(client);
     }
 
+    // ==========================================================================
+// DOOR SOUND HANDLER
+// ==========================================================================
+    private void playDoorSound(boolean opening, Player source) {
+        if (this.level == null) return;
+
+        // --- Play the metallic door sound (server side only) ---
+        if (!this.level.isClientSide) {
+            float dist   = (source != null) ? (float) source.distanceTo(this) : 0f;
+            float volume = Math.max(0.35f, 1.0f - (dist / 24.0f));
+            float pitch  = Math.max(0.75f, 1.0f - (dist / 48.0f));
+
+            this.level.playSound(
+                    null,
+                    this.blockPosition(),
+                    opening ? net.minecraft.sounds.SoundEvents.IRON_DOOR_OPEN
+                            : net.minecraft.sounds.SoundEvents.IRON_DOOR_CLOSE,
+                    net.minecraft.sounds.SoundSource.BLOCKS,
+                    volume,
+                    pitch
+            );
+        }
+    }
+
+    // ==========================================================================
+    // ATTRIBUTES / SPAWN RULES
+    // ==========================================================================
+
     public static void init() {
-        SpawnPlacements.register(CarmodfourModEntities.CARDEMO.get(),
+        SpawnPlacements.register(
+                CarmodfourModEntities.CARDEMO.get(),
                 SpawnPlacements.Type.ON_GROUND,
                 Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
                 (entityType, world, reason, pos, random) ->
                         world.getDifficulty() != Difficulty.PEACEFUL &&
-                                Mob.checkMobSpawnRules(entityType, world, reason, pos, random));
+                                Mob.checkMobSpawnRules(entityType, world, reason, pos, random)
+        );
     }
 
     public static AttributeSupplier.Builder createAttributes() {
         return Mob.createMobAttributes()
                 .add(Attributes.MOVEMENT_SPEED, 0.0)
-                .add(Attributes.MAX_HEALTH, 200) // increased durability
-                .add(Attributes.ARMOR, 10)       // sturdier body
-                .add(Attributes.KNOCKBACK_RESISTANCE, 1.0) // total knockback immunity
+                .add(Attributes.MAX_HEALTH, 200)
+                .add(Attributes.ARMOR, 10)
+                .add(Attributes.KNOCKBACK_RESISTANCE, 1.0)
                 .add(Attributes.ATTACK_DAMAGE, 0)
                 .add(Attributes.FOLLOW_RANGE, 16);
     }
 
-    // === Prevent knockback from attacks, players, explosions, etc. ===
-    @Override
-    public void knockback(double strength, double x, double z) {
-        // Intentionally empty: the car does not get knocked back
-    }
+    // ==========================================================================
+    // PUSH / KNOCKBACK BEHAVIOR
+    // ==========================================================================
 
-    // If you want it to still collide but not be pushed by entities:
     @Override
-    public boolean isPushable() {
-        return false;
-    }
+    public void knockback(double strength, double x, double z) { }
+
+    @Override
+    public boolean isPushable() { return false; }
+
+    // ==========================================================================
+    // ANIMATION HOOKS (GECKOLIB)
+    // ==========================================================================
 
     private <E extends IAnimatable> PlayState movementPredicate(AnimationEvent<E> event) {
         if (this.animationProcedure.equals("empty")) {
@@ -512,4 +1865,91 @@ public class CardemoEntity extends Mob implements IAnimatable {
 
     @Override
     public AnimationFactory getFactory() { return this.factory; }
+
+    // ==========================================================================
+    // RENDERER-FACING ACCESSORS
+    // ==========================================================================
+
+    @OnlyIn(Dist.CLIENT)
+    public float getVisualRoll() {
+        if (this.level != null && this.level.isClientSide) return this.entityData.get(ROLL_SYNC);
+        return visualRoll;
+    }
+
+    // ==========================================================================
+    // TURN SIGNAL RESET HANDLING (on spawn / despawn)
+    // ==========================================================================
+    @Override
+    public void onAddedToWorld() {
+        super.onAddedToWorld();
+        resetSignalState();
+    }
+
+    @Override
+    public void remove(RemovalReason reason) {
+        super.remove(reason);
+        resetSignalState();
+    }
+
+    /** Resets all client + server turn signal flags when spawned/despawned */
+    private void resetSignalState() {
+        if (level.isClientSide) {
+            // Reset the client-visible indicators
+            net.mcreator.carmodfour.client.DriveStateKeybindHandler.resetSignalsClient();
+        }
+    }
+
+    @Override
+    protected net.minecraft.sounds.SoundEvent getHurtSound(DamageSource damageSource) {
+        return SoundEvents.CHAIN_BREAK;
+    }
+
+    @Override
+    protected net.minecraft.sounds.SoundEvent getDeathSound() {
+        return SoundEvents.GENERIC_EXPLODE;
+    }
+
+// ==========================================================================
+// HEADLIGHT BLOCK CLEANUP ON ENTITY REMOVAL (death, /kill, despawn, discard)
+// Drop this whole section anywhere inside CardemoEntity (e.g., near other helpers)
+// ==========================================================================
+
+    /** Server-side helper: clears all invisible headlight blocks around this car. */
+    private void cleanupHeadlightBlocksNow() {
+        if (this.level == null || this.level.isClientSide) return;
+        if (!(this.level instanceof net.minecraft.server.level.ServerLevel server)) return;
+
+        net.minecraft.world.level.block.Block headlight =
+                net.minecraftforge.registries.ForgeRegistries.BLOCKS.getValue(
+                        new net.minecraft.resources.ResourceLocation(HEADLIGHT_BLOCK_ID));
+
+        if (headlight != null) {
+            clearHeadlightBlocksAround(server, headlight);
+        }
+    }
+
+    /**
+     * Called when the entity is removed from the world on either side.
+     * This is invoked for: death, /kill, discard(), chunk/despawn, dimension changes, etc.
+     */
+    @Override
+    public void onRemovedFromWorld() {
+        // --- NEW: ensure headlight blocks are cleaned on any removal path (server side) ---
+        cleanupHeadlightBlocksNow();
+
+        // Keep existing behavior
+        super.onRemovedFromWorld();
+    }
+// ==========================================================================
+// END HEADLIGHT BLOCK CLEANUP SECTION
+// ==========================================================================
+
+
+    // ==========================================================================
+    // MATH UTILS
+    // ==========================================================================
+
+    private static float lerp(float a, float b, float t) {
+        return a + (b - a) * t;
+    }
 }

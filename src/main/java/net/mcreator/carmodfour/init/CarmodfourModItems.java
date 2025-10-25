@@ -20,7 +20,5 @@ import net.mcreator.carmodfour.CarmodfourMod;
 public class CarmodfourModItems {
 	public static final DeferredRegister<Item> REGISTRY = DeferredRegister.create(ForgeRegistries.ITEMS, CarmodfourMod.MODID);
 	public static final RegistryObject<Item> CARSPAWNER = REGISTRY.register("carspawner", () -> new CARSPAWNERItem());
-	public static final RegistryObject<Item> CARDEMO_SPAWN_EGG = REGISTRY.register("cardemo_spawn_egg", () -> new ForgeSpawnEggItem(CarmodfourModEntities.CARDEMO, -1, -1, new Item.Properties().tab(CreativeModeTab.TAB_MISC)));
-	public static final RegistryObject<Item> CAR_KEY = REGISTRY.register("car_key", () -> new CarKeyItem());
 	public static final RegistryObject<Item> EXAMPLEGECKOLIBITEM = REGISTRY.register("examplegeckolibitem", () -> new ExamplegeckolibitemItem());
 }

@@ -5,10 +5,15 @@ license="Academic Free License v3.0"
 [[mods]]
 modId="carmodfour"
 version="1.0.0"
-displayName="carmodfour"
+displayName="Tieshin's Car Mod 1.19.2 ALPHA"
 credits="Created using mod maker MCreator - https://mcreator.net/about"
 displayURL="https://mcreator.net"
 authors="tiesh, MCreator"
+description='''
+Alpha-focused vehicle mod featuring realistic driving physics,
+terrain-aware tilt, collision recoil, dynamic headlights, locking,
+repairs, entity knockback, and cinematic destruction.
+'''
 
 [[dependencies.carmodfour]]
     modId="minecraft"
@@ -17,12 +22,9 @@ authors="tiesh, MCreator"
     ordering="NONE"
     side="BOTH"
 
-
-
 [[dependencies.carmodfour]]
     modId="geckolib"
     mandatory=false
     versionRange="[0,)"
     ordering="NONE"
     side="BOTH"
-
